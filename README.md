@@ -51,6 +51,8 @@ output/excess_report.xlsx
 - 讀取 `shortage` 的 `Overshortage1`、`PO_REMAIN` 與第一欄 WO 外 demand。
 - 若找不到 `Overshortage1`，會用 `OVER_SHORTAGE + HLD` 當替代。
 - 從 BOM 的 G 欄判斷替代料：非 `*R*` 是主料，後續同一 BOM 區段連續 `*R*` 是替代料。
+- 替代料不做跨機種/跨 BOM 區段的全域串聯；同一料號若在多個 BOM 區段出現，程式會挑選最適合目前 shortage 料號的一個區段。
+- 已經被某一列 Excess 使用過的 shortage 料號，不會在後續列重複加總。
 - 同一替代料群組最多輸出 `PartNo1` 到 `替代料7`。
 - 數量欄直接寫入計算後的值，不依賴輸出檔內公式。
 

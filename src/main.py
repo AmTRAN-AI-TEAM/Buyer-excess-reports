@@ -51,7 +51,7 @@ def main() -> None:
     if result.truncated_group_count:
         print(
             "Warning: "
-            f"{result.truncated_group_count} BOM alternate groups had more than 7 parts; "
+            f"{result.truncated_group_count} BOM alternate segments had more than 7 parts; "
             "only listed parts were totaled."
         )
     print(f"Output: {output_file}")

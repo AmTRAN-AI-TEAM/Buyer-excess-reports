@@ -8,19 +8,32 @@ from typing import Any
 from openpyxl import load_workbook
 
 
+@dataclass(frozen=True)
+class BomAlternateSegment:
+    row_number: int
+    parts: tuple[str, ...]
+    base_part: str
+    customer: str | None
+    model: str | None
+
+
 @dataclass
 class BomAlternates:
-    groups_by_part: dict[str, tuple[str, ...]]
+    segments_by_part: dict[str, tuple[BomAlternateSegment, ...]]
     first_seen_order: dict[str, int]
     customers_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     models_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
-    def group_for(self, part_no: str) -> tuple[str, ...]:
-        return self.groups_by_part.get(part_no, (part_no,))
-
-    def ordered_group_for(self, part_no: str) -> tuple[str, ...]:
-        group = self.group_for(part_no)
-        return tuple(sorted(group, key=lambda part: self.first_seen_order.get(part, 10**9)))
+    def ordered_group_for(
+        self,
+        part_no: str,
+        known_parts: set[str] | None = None,
+        active_parts: set[str] | None = None,
+    ) -> tuple[str, ...]:
+        segment = self._best_segment_for(part_no, known_parts or set(), active_parts or set())
+        if segment is None:
+            return (part_no,)
+        return segment.parts
 
     def customer_summary(self, parts: list[str]) -> str | None:
         return _join_limited(_unique_values(self.customers_by_part, parts))
@@ -28,22 +41,26 @@ class BomAlternates:
     def model_summary(self, parts: list[str]) -> str | None:
         return _join_limited(_unique_values(self.models_by_part, parts))
 
+    def _best_segment_for(
+        self,
+        part_no: str,
+        known_parts: set[str],
+        active_parts: set[str],
+    ) -> BomAlternateSegment | None:
+        candidates = self.segments_by_part.get(part_no, ())
+        if not candidates:
+            return None
 
-class _UnionFind:
-    def __init__(self) -> None:
-        self.parent: dict[str, str] = {}
-
-    def find(self, item: str) -> str:
-        self.parent.setdefault(item, item)
-        if self.parent[item] != item:
-            self.parent[item] = self.find(self.parent[item])
-        return self.parent[item]
-
-    def union(self, left: str, right: str) -> None:
-        left_root = self.find(left)
-        right_root = self.find(right)
-        if left_root != right_root:
-            self.parent[right_root] = left_root
+        return max(
+            candidates,
+            key=lambda segment: (
+                segment.base_part == part_no,
+                sum(part in active_parts for part in segment.parts),
+                sum(part in known_parts for part in segment.parts),
+                len(segment.parts),
+                -segment.row_number,
+            ),
+        )
 
 
 def load_bom_alternates(bom_path: Path) -> BomAlternates:
@@ -52,16 +69,20 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     bom_ws = workbook[bom_sheet]
 
     finished_goods = _load_finished_goods(workbook)
-    union_find = _UnionFind()
     first_seen: dict[str, int] = {}
     customers: dict[str, list[str]] = defaultdict(list)
     models: dict[str, list[str]] = defaultdict(list)
+    segments: list[BomAlternateSegment] = []
 
     current_context: tuple[Any, Any, Any] | None = None
     current_base: str | None = None
+    current_base_row: int | None = None
+    current_parts: list[str] = []
+    current_customer: str | None = None
+    current_model: str | None = None
     order = 0
 
-    for row in bom_ws.iter_rows(min_row=2, values_only=True):
+    for row_number, row in enumerate(bom_ws.iter_rows(min_row=2, values_only=True), start=2):
         top_assembly = row[0] if len(row) > 0 else None
         bill_level = row[2] if len(row) > 2 else None
         assembly_item = row[3] if len(row) > 3 else None
@@ -76,7 +97,6 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
             first_seen[part_no] = order
             order += 1
 
-        union_find.find(part_no)
         _collect_finished_good_metadata(
             part_no,
             top_assembly,
@@ -88,27 +108,46 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         context = (top_assembly, bill_level, assembly_item)
         if _is_replacement_marker(item_seq):
             if current_base and current_context == context:
-                union_find.union(current_base, part_no)
+                current_parts.append(part_no)
             continue
 
+        _append_segment(
+            segments,
+            current_base_row,
+            current_base,
+            current_parts,
+            current_customer,
+            current_model,
+        )
         current_context = context
         current_base = part_no
-
-    grouped: dict[str, list[str]] = defaultdict(list)
-    for part_no in union_find.parent:
-        grouped[union_find.find(part_no)].append(part_no)
-
-    groups_by_part: dict[str, tuple[str, ...]] = {}
-    for members in grouped.values():
-        ordered_members = tuple(
-            sorted(members, key=lambda part: first_seen.get(part, 10**9))
+        current_base_row = row_number
+        current_parts = [part_no]
+        current_customer, current_model = _finished_good_metadata(
+            top_assembly,
+            finished_goods,
         )
-        for part_no in ordered_members:
-            groups_by_part[part_no] = ordered_members
+
+    _append_segment(
+        segments,
+        current_base_row,
+        current_base,
+        current_parts,
+        current_customer,
+        current_model,
+    )
+
+    segments_by_part: dict[str, list[BomAlternateSegment]] = defaultdict(list)
+    for segment in segments:
+        for part_no in segment.parts:
+            segments_by_part[part_no].append(segment)
 
     workbook.close()
     return BomAlternates(
-        groups_by_part=groups_by_part,
+        segments_by_part={
+            part_no: tuple(part_segments)
+            for part_no, part_segments in segments_by_part.items()
+        },
         first_seen_order=first_seen,
         customers_by_part={key: tuple(values) for key, values in customers.items()},
         models_by_part={key: tuple(values) for key, values in models.items()},
@@ -141,6 +180,44 @@ def _load_finished_goods(workbook: Any) -> dict[str, tuple[Any, Any]]:
     return mapping
 
 
+def _append_segment(
+    segments: list[BomAlternateSegment],
+    row_number: int | None,
+    base_part: str | None,
+    parts: list[str],
+    customer: str | None,
+    model: str | None,
+) -> None:
+    if row_number is None or base_part is None or len(parts) <= 1:
+        return
+
+    unique_parts: list[str] = []
+    for part_no in parts:
+        if part_no not in unique_parts:
+            unique_parts.append(part_no)
+
+    segments.append(
+        BomAlternateSegment(
+            row_number=row_number,
+            parts=tuple(unique_parts),
+            base_part=base_part,
+            customer=customer,
+            model=model,
+        )
+    )
+
+
+def _finished_good_metadata(
+    top_assembly: Any,
+    finished_goods: dict[str, tuple[Any, Any]],
+) -> tuple[str | None, str | None]:
+    if top_assembly in (None, ""):
+        return None, None
+
+    customer, model = finished_goods.get(str(top_assembly).strip(), (None, None))
+    return _text_or_none(customer), _text_or_none(model)
+
+
 def _collect_finished_good_metadata(
     part_no: str,
     top_assembly: Any,
@@ -164,11 +241,16 @@ def _is_replacement_marker(value: Any) -> bool:
 
 
 def _append_unique(values: list[str], value: Any) -> None:
-    if value in (None, ""):
-        return
-    text = str(value).strip()
+    text = _text_or_none(value)
     if text and text not in values:
         values.append(text)
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _unique_values(source: dict[str, tuple[str, ...]], parts: list[str]) -> list[str]:

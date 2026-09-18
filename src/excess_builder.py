@@ -134,16 +134,28 @@ def build_excess_rows(
 ) -> ExcessBuildResult:
     records_by_part = {record.part_no: record for record in shortage_records}
     source_order = {record.part_no: index for index, record in enumerate(shortage_records)}
-    seen_group_keys: set[tuple[str, ...]] = set()
+    known_parts = set(records_by_part)
+    active_parts = {
+        record.part_no
+        for record in shortage_records
+        if record.overshortage != 0 or record.wo_demand != 0 or record.open_po != 0
+    }
+    assigned_parts: set[str] = set()
     rows: list[list[Any]] = []
     truncated_group_count = 0
 
     for record in shortage_records:
-        full_group = _shortage_aware_group(record.part_no, alternates, records_by_part)
-        group_key = tuple(sorted(full_group))
-        if group_key in seen_group_keys:
+        if record.part_no in assigned_parts:
             continue
-        seen_group_keys.add(group_key)
+
+        full_group = _shortage_aware_group(
+            record.part_no,
+            alternates,
+            records_by_part,
+            known_parts,
+            active_parts,
+            assigned_parts,
+        )
 
         displayed_parts, was_truncated = _displayed_parts(
             record.part_no,
@@ -163,6 +175,7 @@ def build_excess_rows(
         open_po_total = sum(open_po_values)
 
         if overshortage_total == 0 and wo_total == 0 and open_po_total == 0:
+            assigned_parts.update(part for part in displayed_parts if part in records_by_part)
             continue
 
         main_record = _first_record(displayed_parts, records_by_part)
@@ -178,7 +191,7 @@ def build_excess_rows(
         model = alternates.model_summary(displayed_parts)
         note = None
         if was_truncated:
-            note = f"BOM alternate group has more than {MAX_PART_COLUMNS} parts; only listed parts are totaled."
+            note = f"BOM alternate segment has more than {MAX_PART_COLUMNS} parts; only listed parts are totaled."
 
         rows.append(
             _pad(displayed_parts, MAX_PART_COLUMNS)
@@ -214,6 +227,7 @@ def build_excess_rows(
                 None,
             ]
         )
+        assigned_parts.update(part for part in displayed_parts if part in records_by_part)
 
     return ExcessBuildResult(
         rows=rows,
@@ -227,18 +241,31 @@ def _shortage_aware_group(
     part_no: str,
     alternates: BomAlternates,
     records_by_part: dict[str, ShortageRecord],
+    known_parts: set[str],
+    active_parts: set[str],
+    assigned_parts: set[str],
 ) -> list[str]:
-    group = list(alternates.ordered_group_for(part_no))
+    group = list(
+        alternates.ordered_group_for(
+            part_no,
+            known_parts=known_parts,
+            active_parts=active_parts,
+        )
+    )
     if part_no not in group:
         group.insert(0, part_no)
 
-    # Keep BOM-only alternatives available for display, but make shortage parts
-    # deterministic and visible first.
-    shortage_parts = [part for part in group if part in records_by_part]
-    bom_only_parts = [part for part in group if part not in records_by_part]
-    if part_no in shortage_parts:
-        shortage_parts.remove(part_no)
-    return [part_no] + shortage_parts + bom_only_parts
+    visible_parts: list[str] = []
+    for part in group:
+        if part != part_no and part in assigned_parts:
+            continue
+        if part not in visible_parts:
+            visible_parts.append(part)
+
+    if part_no not in visible_parts:
+        visible_parts.insert(0, part_no)
+
+    return visible_parts
 
 
 def _displayed_parts(
