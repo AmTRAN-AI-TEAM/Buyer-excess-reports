@@ -44,16 +44,17 @@ def main() -> None:
     alternates = load_bom_alternates(bom_file)
     shortage_records = load_shortage_records(shortage_source)
     result = build_excess_rows(shortage_records, alternates)
-    write_excess_workbook(result.rows, output_file)
+    write_excess_workbook(
+        result.rows,
+        output_file,
+        result.row1_headers,
+        result.row2_headers,
+        result.part_column_count,
+    )
 
     print(f"Read shortage parts: {result.input_part_count}")
     print(f"Generated Excess rows: {result.output_row_count}")
-    if result.truncated_group_count:
-        print(
-            "Warning: "
-            f"{result.truncated_group_count} BOM alternate segments had more than 7 parts; "
-            "only listed parts were totaled."
-        )
+    print(f"Part columns: {result.part_column_count}")
     print(f"Output: {output_file}")
 
 

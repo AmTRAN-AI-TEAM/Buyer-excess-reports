@@ -3,105 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from openpyxl.utils import get_column_letter
+
 from bom_alternates import BomAlternates
 from workbook_io import ShortageRecord
 
 
-MAX_PART_COLUMNS = 7
-
-ROW1_HEADERS = [
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    "Total",
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    "Total",
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    "Total",
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    "Total",
-    "Excess",
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-    None,
-]
-
-ROW2_HEADERS = [
-    "PartNo1",
-    "替代料2",
-    "替代料3",
-    "替代料4",
-    "替代料5",
-    "替代料6",
-    "替代料7",
-    "Desc",
-    "Planner",
-    "GSD",
-    "LT",
-    "MOQ",
-    "Price（USD)",
-    "Overshortage",
-    "Overshortage1",
-    "Overshortage2",
-    "Overshortage3",
-    "Overshortage4",
-    "Overshortage5",
-    "Overshortage6",
-    "Overshortage7",
-    "WO外demand",
-    "WO 外demand1",
-    "WO 外demand2",
-    "WO 外demand3",
-    "WO 外demand4",
-    "WO 外demand5",
-    "WO 外demand6",
-    "WO 外demand7",
-    "Openpo",
-    "Open po1",
-    "Open po2",
-    "Open po3",
-    "Open po4",
-    "Open po5",
-    "Open po6",
-    "Open po7",
+INFO_HEADERS = ["Desc", "Planner", "GSD", "LT", "MOQ", "Price（USD)"]
+TAIL_HEADERS = [
     "Riskbuy",
     "Excess\nstockQTY",
     "Excess\nstockAmount",
@@ -123,9 +32,25 @@ ROW2_HEADERS = [
 @dataclass(frozen=True)
 class ExcessBuildResult:
     rows: list[list[Any]]
+    row1_headers: list[Any]
+    row2_headers: list[str]
+    part_column_count: int
     input_part_count: int
     output_row_count: int
-    truncated_group_count: int
+
+
+@dataclass(frozen=True)
+class _PreparedExcessRow:
+    parts: list[str]
+    main_record: ShortageRecord
+    overshortage_values: list[float]
+    wo_values: list[float]
+    open_po_values: list[float]
+    overshortage_total: float
+    wo_total: float
+    open_po_total: float
+    customer: str | None
+    model: str | None
 
 
 def build_excess_rows(
@@ -133,7 +58,6 @@ def build_excess_rows(
     alternates: BomAlternates,
 ) -> ExcessBuildResult:
     records_by_part = {record.part_no: record for record in shortage_records}
-    source_order = {record.part_no: index for index, record in enumerate(shortage_records)}
     known_parts = set(records_by_part)
     active_parts = {
         record.part_no
@@ -141,8 +65,8 @@ def build_excess_rows(
         if record.overshortage != 0 or record.wo_demand != 0 or record.open_po != 0
     }
     assigned_parts: set[str] = set()
-    rows: list[list[Any]] = []
-    truncated_group_count = 0
+    prepared_rows: list[_PreparedExcessRow] = []
+    part_column_count = 1
 
     for record in shortage_records:
         if record.part_no in assigned_parts:
@@ -157,14 +81,7 @@ def build_excess_rows(
             assigned_parts,
         )
 
-        displayed_parts, was_truncated = _displayed_parts(
-            record.part_no,
-            full_group,
-            source_order,
-            alternates,
-        )
-        if was_truncated:
-            truncated_group_count += 1
+        displayed_parts = _ordered_parts(full_group)
 
         overshortage_values = [_metric(records_by_part, part, "overshortage") for part in displayed_parts]
         wo_values = [_metric(records_by_part, part, "wo_demand") for part in displayed_parts]
@@ -179,62 +96,171 @@ def build_excess_rows(
             continue
 
         main_record = _first_record(displayed_parts, records_by_part)
-        stock_qty = overshortage_total - wo_total
-        price = None
-        stock_amount = 0
-        po_qty = open_po_total if stock_qty > 0 else stock_qty + open_po_total
-        po_amount = 0
-        total_amount = stock_amount + po_amount
-        previous_total = None
-        improve = total_amount - (previous_total or 0)
         customer = alternates.customer_summary(displayed_parts)
         model = alternates.model_summary(displayed_parts)
-        note = None
-        if was_truncated:
-            note = f"BOM alternate segment has more than {MAX_PART_COLUMNS} parts; only listed parts are totaled."
 
-        rows.append(
-            _pad(displayed_parts, MAX_PART_COLUMNS)
-            + [
-                main_record.description,
-                main_record.planner,
-                main_record.buyer,
-                main_record.lt,
-                main_record.moq,
-                price,
-                overshortage_total,
-            ]
-            + _pad(overshortage_values, MAX_PART_COLUMNS, fill=0)
-            + [wo_total]
-            + _pad(wo_values, MAX_PART_COLUMNS, fill=0)
-            + [open_po_total]
-            + _pad(open_po_values, MAX_PART_COLUMNS, fill=0)
-            + [
-                0,
-                stock_qty,
-                stock_amount,
-                po_qty,
-                po_amount,
-                total_amount,
-                None,
-                note,
-                customer,
-                model,
-                model,
-                None,
-                improve,
-                previous_total,
-                None,
-            ]
+        prepared_rows.append(
+            _PreparedExcessRow(
+                parts=displayed_parts,
+                main_record=main_record,
+                overshortage_values=overshortage_values,
+                wo_values=wo_values,
+                open_po_values=open_po_values,
+                overshortage_total=overshortage_total,
+                wo_total=wo_total,
+                open_po_total=open_po_total,
+                customer=customer,
+                model=model,
+            )
         )
+        part_column_count = max(part_column_count, len(displayed_parts))
         assigned_parts.update(part for part in displayed_parts if part in records_by_part)
+
+    row1_headers = build_row1_headers(part_column_count)
+    row2_headers = build_row2_headers(part_column_count)
+    rows = [
+        _build_output_row(
+            row,
+            part_column_count,
+            row_number=index + 3,
+            row2_headers=row2_headers,
+        )
+        for index, row in enumerate(prepared_rows)
+    ]
 
     return ExcessBuildResult(
         rows=rows,
+        row1_headers=row1_headers,
+        row2_headers=row2_headers,
+        part_column_count=part_column_count,
         input_part_count=len(shortage_records),
         output_row_count=len(rows),
-        truncated_group_count=truncated_group_count,
     )
+
+
+def build_row1_headers(part_column_count: int) -> list[Any]:
+    return (
+        [None] * (part_column_count + len(INFO_HEADERS))
+        + ["Total"]
+        + [None] * part_column_count
+        + ["Total"]
+        + [None] * part_column_count
+        + ["Total"]
+        + [None] * part_column_count
+        + ["Total", "Excess"]
+        + [None] * 4
+        + [None] * 9
+    )
+
+
+def build_row2_headers(part_column_count: int) -> list[str]:
+    return (
+        _part_headers(part_column_count)
+        + INFO_HEADERS
+        + ["Overshortage"]
+        + [f"Overshortage{index}" for index in range(1, part_column_count + 1)]
+        + ["WO外demand"]
+        + [f"WO 外demand{index}" for index in range(1, part_column_count + 1)]
+        + ["Openpo"]
+        + [f"Open po{index}" for index in range(1, part_column_count + 1)]
+        + TAIL_HEADERS
+    )
+
+
+def _part_headers(part_column_count: int) -> list[str]:
+    return ["PartNo1"] + [
+        f"替代料{index}" for index in range(2, part_column_count + 1)
+    ]
+
+
+def _build_output_row(
+    row: _PreparedExcessRow,
+    part_column_count: int,
+    row_number: int,
+    row2_headers: list[str],
+) -> list[Any]:
+    price = None
+    previous_total = None
+    formulas = _row_formulas(row_number, row2_headers, part_column_count)
+
+    return (
+        _pad(row.parts, part_column_count)
+        + [
+            row.main_record.description,
+            row.main_record.planner,
+            row.main_record.buyer,
+            row.main_record.lt,
+            row.main_record.moq,
+            price,
+            formulas["overshortage_total"],
+        ]
+        + _pad(row.overshortage_values, part_column_count, fill=0)
+        + [formulas["wo_total"]]
+        + _pad(row.wo_values, part_column_count, fill=0)
+        + [formulas["open_po_total"]]
+        + _pad(row.open_po_values, part_column_count, fill=0)
+        + [
+            None,
+            formulas["stock_qty"],
+            formulas["stock_amount"],
+            formulas["po_qty"],
+            formulas["po_amount"],
+            formulas["total_amount"],
+            None,
+            None,
+            row.customer,
+            row.model,
+            row.model,
+            None,
+            formulas["improve"],
+            previous_total,
+            None,
+        ]
+    )
+
+
+def _row_formulas(
+    row_number: int,
+    row2_headers: list[str],
+    part_column_count: int,
+) -> dict[str, str]:
+    overshortage_total = _cell_ref(row2_headers, "Overshortage", row_number)
+    overshortage_first = _cell_ref(row2_headers, "Overshortage1", row_number)
+    overshortage_last = _cell_ref(
+        row2_headers,
+        f"Overshortage{part_column_count}",
+        row_number,
+    )
+    wo_total = _cell_ref(row2_headers, "WO外demand", row_number)
+    wo_first = _cell_ref(row2_headers, "WO 外demand1", row_number)
+    wo_last = _cell_ref(row2_headers, f"WO 外demand{part_column_count}", row_number)
+    open_po_total = _cell_ref(row2_headers, "Openpo", row_number)
+    open_po_first = _cell_ref(row2_headers, "Open po1", row_number)
+    open_po_last = _cell_ref(row2_headers, f"Open po{part_column_count}", row_number)
+    price = _cell_ref(row2_headers, "Price（USD)", row_number)
+    stock_qty = _cell_ref(row2_headers, "Excess\nstockQTY", row_number)
+    stock_amount = _cell_ref(row2_headers, "Excess\nstockAmount", row_number)
+    po_qty = _cell_ref(row2_headers, "Excess\nPOQty", row_number)
+    po_amount = _cell_ref(row2_headers, "Excess\nPOAmount", row_number)
+    total_amount = _cell_ref(row2_headers, "Excess\nTotalAMT", row_number)
+    previous_total = _cell_ref(row2_headers, "Previous Excess Total AMT", row_number)
+
+    return {
+        "overshortage_total": f"=SUM({overshortage_first}:{overshortage_last})",
+        "wo_total": f"=SUM({wo_first}:{wo_last})",
+        "open_po_total": f"=SUM({open_po_first}:{open_po_last})",
+        "stock_qty": f"={overshortage_total}-{wo_total}",
+        "stock_amount": f"=IF({stock_qty}<0,0,{stock_qty}*{price})",
+        "po_qty": f"=IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total})",
+        "po_amount": f"=IF({po_qty}>0,{po_qty}*{price},0)",
+        "total_amount": f"={po_amount}+{stock_amount}",
+        "improve": f"={total_amount}-{previous_total}",
+    }
+
+
+def _cell_ref(headers: list[str], header: str, row_number: int) -> str:
+    column = headers.index(header) + 1
+    return f"{get_column_letter(column)}{row_number}"
 
 
 def _shortage_aware_group(
@@ -268,29 +294,12 @@ def _shortage_aware_group(
     return visible_parts
 
 
-def _displayed_parts(
-    main_part: str,
-    group: list[str],
-    source_order: dict[str, int],
-    alternates: BomAlternates,
-) -> tuple[list[str], bool]:
+def _ordered_parts(group: list[str]) -> list[str]:
     unique_group = []
     for part in group:
         if part not in unique_group:
             unique_group.append(part)
-
-    if len(unique_group) <= MAX_PART_COLUMNS:
-        return unique_group, False
-
-    remaining = [part for part in unique_group if part != main_part]
-    remaining.sort(
-        key=lambda part: (
-            0 if part in source_order else 1,
-            source_order.get(part, 10**9),
-            alternates.first_seen_order.get(part, 10**9),
-        )
-    )
-    return [main_part] + remaining[: MAX_PART_COLUMNS - 1], True
+    return unique_group
 
 
 def _first_record(

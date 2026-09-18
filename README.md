@@ -53,8 +53,10 @@ output/excess_report.xlsx
 - 從 BOM 的 G 欄判斷替代料：非 `*R*` 是主料，後續同一 BOM 區段連續 `*R*` 是替代料。
 - 替代料不做跨機種/跨 BOM 區段的全域串聯；同一料號若在多個 BOM 區段出現，程式會挑選最適合目前 shortage 料號的一個區段。
 - 已經被某一列 Excess 使用過的 shortage 料號，不會在後續列重複加總。
-- 同一替代料群組最多輸出 `PartNo1` 到 `替代料7`。
-- 數量欄直接寫入計算後的值，不依賴輸出檔內公式。
+- 程式會先偵測所有 Excess 列需要的最大料號數，動態產出 `PartNo1` 到 `替代料N`。
+- `OvershortageN`、`WO 外demandN`、`Open poN` 也會跟著 `替代料N` 自動增加。
+- 逐料號的 `OvershortageN`、`WO 外demandN`、`Open poN` 會寫入從 shortage 算出的值。
+- Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補 `Price（USD)` 或前版金額時可自動重算。
 
 ## 自訂路徑
 
