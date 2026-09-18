@@ -250,11 +250,11 @@ def _row_formulas(
         "wo_total": f"=SUM({wo_first}:{wo_last})",
         "open_po_total": f"=SUM({open_po_first}:{open_po_last})",
         "stock_qty": f"={overshortage_total}-{wo_total}",
-        "stock_amount": f"=IF({stock_qty}<0,0,{stock_qty}*{price})",
+        "stock_amount": f'=IF({price}="","",IF({stock_qty}<0,0,{stock_qty}*{price}))',
         "po_qty": f"=IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total})",
-        "po_amount": f"=IF({po_qty}>0,{po_qty}*{price},0)",
-        "total_amount": f"={po_amount}+{stock_amount}",
-        "improve": f"={total_amount}-{previous_total}",
+        "po_amount": f'=IF({price}="","",IF({po_qty}>0,{po_qty}*{price},0))',
+        "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),"",{po_amount}+{stock_amount})',
+        "improve": f'=IF(OR({total_amount}="",{previous_total}=""),"",{total_amount}-{previous_total})',
     }
 
 

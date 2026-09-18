@@ -2,7 +2,7 @@
 
 從 `BOM.xlsx` 與含有 `shortage` 分頁的 Excel，自動產出可用版 `Excess` 報表。
 
-目前第一版目標是穩定產出 `Excess` sheet。價格、供應商、分類、呆料註記、前版金額等缺少明確來源的欄位會留空或為 0。
+目前第一版目標是穩定產出 `Excess` sheet。價格、供應商、分類、呆料註記、前版金額等缺少明確來源的欄位會留空。
 
 ## 資料夾
 
@@ -57,6 +57,7 @@ output/excess_report.xlsx
 - `OvershortageN`、`WO 外demandN`、`Open poN` 也會跟著 `替代料N` 自動增加。
 - 逐料號的 `OvershortageN`、`WO 外demandN`、`Open poN` 會寫入從 shortage 算出的值。
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補 `Price（USD)` 或前版金額時可自動重算。
+- 金額公式若受到缺少來源欄位影響，會先顯示空白；例如 `Price（USD)` 空白時，`Excess stockAmount`、`Excess POAmount`、`Excess TotalAMT` 會保持空白，避免把資料不足誤判成金額為 0。
 
 ## 自訂路徑
 
