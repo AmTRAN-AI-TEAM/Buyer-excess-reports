@@ -41,8 +41,10 @@ if exist release\BuyerExcessReports rmdir /s /q release\BuyerExcessReports
   --clean ^
   --onedir ^
   --console ^
+  --paths src ^
   --hidden-import tkinter ^
   --hidden-import tkinter.ttk ^
+  --hidden-import tkinter.messagebox ^
   --hidden-import tqdm ^
   --name BuyerExcessReports ^
   --distpath release ^
@@ -52,6 +54,15 @@ if exist release\BuyerExcessReports rmdir /s /q release\BuyerExcessReports
 if errorlevel 1 (
     echo.
     echo Build failed while creating the exe.
+    pause
+    exit /b 1
+)
+
+release\BuyerExcessReports\BuyerExcessReports.exe --help >nul
+if errorlevel 1 (
+    echo.
+    echo Build output failed the startup check.
+    echo Please run release\BuyerExcessReports\BuyerExcessReports.exe from Command Prompt to see the error.
     pause
     exit /b 1
 )
