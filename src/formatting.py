@@ -8,6 +8,10 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
+DEFAULT_FONT_NAME = "Microsoft YaHei"
+DEFAULT_FONT_SIZE = 9
+
+
 def write_excess_workbook(
     rows: list[list[Any]],
     output_file: Path,
@@ -52,8 +56,14 @@ def _apply_layout(
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     group_fill = PatternFill("solid", fgColor="D9EAF7")
-    header_font = Font(color="FFFFFF", bold=True)
-    group_font = Font(bold=True)
+    base_font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
+    header_font = Font(
+        name=DEFAULT_FONT_NAME,
+        size=DEFAULT_FONT_SIZE,
+        color="FFFFFF",
+        bold=True,
+    )
+    group_font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE, bold=True)
     thin_gray = Side(style="thin", color="D9D9D9")
     border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
 
@@ -64,6 +74,7 @@ def _apply_layout(
     ):
         for cell in row:
             cell.border = border
+            cell.font = base_font
             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     for cell in worksheet[1]:

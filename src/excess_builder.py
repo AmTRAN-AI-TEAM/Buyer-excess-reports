@@ -51,6 +51,7 @@ class _PreparedExcessRow:
     open_po_total: float
     customer: str | None
     model: str | None
+    model_remark: str | None
 
 
 def build_excess_rows(
@@ -98,6 +99,7 @@ def build_excess_rows(
         main_record = _first_record(displayed_parts, records_by_part)
         customer = alternates.customer_summary(displayed_parts)
         model = alternates.model_summary(displayed_parts)
+        model_remark = alternates.model_remark_summary(displayed_parts)
 
         prepared_rows.append(
             _PreparedExcessRow(
@@ -111,6 +113,7 @@ def build_excess_rows(
                 open_po_total=open_po_total,
                 customer=customer,
                 model=model,
+                model_remark=model_remark,
             )
         )
         part_column_count = max(part_column_count, len(displayed_parts))
@@ -210,7 +213,7 @@ def _build_output_row(
             None,
             row.customer,
             row.model,
-            row.model,
+            row.model_remark,
             None,
             formulas["improve"],
             previous_total,

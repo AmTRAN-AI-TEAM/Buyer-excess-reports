@@ -17,12 +17,20 @@ class BomAlternateSegment:
     model: str | None
 
 
+@dataclass(frozen=True)
+class FinishedGoodMetadata:
+    customer: str | None
+    finished_good: str
+    model: str | None
+
+
 @dataclass
 class BomAlternates:
     segments_by_part: dict[str, tuple[BomAlternateSegment, ...]]
     first_seen_order: dict[str, int]
     customers_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     models_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    finished_goods_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def ordered_group_for(
         self,
@@ -39,7 +47,10 @@ class BomAlternates:
         return _join_limited(_unique_values(self.customers_by_part, parts))
 
     def model_summary(self, parts: list[str]) -> str | None:
-        return _join_limited(_unique_values(self.models_by_part, parts))
+        return _join_all(_unique_values(self.models_by_part, parts))
+
+    def model_remark_summary(self, parts: list[str]) -> str | None:
+        return _join_all(_unique_values(self.finished_goods_by_part, parts))
 
     def _best_segment_for(
         self,
@@ -72,6 +83,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     first_seen: dict[str, int] = {}
     customers: dict[str, list[str]] = defaultdict(list)
     models: dict[str, list[str]] = defaultdict(list)
+    finished_goods_by_part: dict[str, list[str]] = defaultdict(list)
     segments: list[BomAlternateSegment] = []
 
     current_context: tuple[Any, Any, Any] | None = None
@@ -103,6 +115,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
             finished_goods,
             customers,
             models,
+            finished_goods_by_part,
         )
 
         context = (top_assembly, bill_level, assembly_item)
@@ -151,6 +164,10 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         first_seen_order=first_seen,
         customers_by_part={key: tuple(values) for key, values in customers.items()},
         models_by_part={key: tuple(values) for key, values in models.items()},
+        finished_goods_by_part={
+            key: tuple(values)
+            for key, values in finished_goods_by_part.items()
+        },
     )
 
 
@@ -161,7 +178,7 @@ def _find_sheet(sheet_names: list[str], expected_name: str) -> str:
     raise ValueError(f"Cannot find required sheet {expected_name}")
 
 
-def _load_finished_goods(workbook: Any) -> dict[str, tuple[Any, Any]]:
+def _load_finished_goods(workbook: Any) -> dict[str, FinishedGoodMetadata]:
     sheet_name = next(
         (name for name in workbook.sheetnames if name.lower() == "成品料号"),
         None,
@@ -170,13 +187,18 @@ def _load_finished_goods(workbook: Any) -> dict[str, tuple[Any, Any]]:
         return {}
 
     worksheet = workbook[sheet_name]
-    mapping: dict[str, tuple[Any, Any]] = {}
+    mapping: dict[str, FinishedGoodMetadata] = {}
     for row in worksheet.iter_rows(min_row=2, values_only=True):
         customer = row[0] if len(row) > 0 else None
         finished_good = row[1] if len(row) > 1 else None
         model = row[2] if len(row) > 2 else None
-        if finished_good not in (None, ""):
-            mapping[str(finished_good).strip()] = (customer, model)
+        finished_good_text = _text_or_none(finished_good)
+        if finished_good_text:
+            mapping[finished_good_text] = FinishedGoodMetadata(
+                customer=_text_or_none(customer),
+                finished_good=finished_good_text,
+                model=_text_or_none(model),
+            )
     return mapping
 
 
@@ -209,28 +231,35 @@ def _append_segment(
 
 def _finished_good_metadata(
     top_assembly: Any,
-    finished_goods: dict[str, tuple[Any, Any]],
+    finished_goods: dict[str, FinishedGoodMetadata],
 ) -> tuple[str | None, str | None]:
     if top_assembly in (None, ""):
         return None, None
 
-    customer, model = finished_goods.get(str(top_assembly).strip(), (None, None))
-    return _text_or_none(customer), _text_or_none(model)
+    metadata = finished_goods.get(str(top_assembly).strip())
+    if metadata is None:
+        return None, None
+    return metadata.customer, metadata.model
 
 
 def _collect_finished_good_metadata(
     part_no: str,
     top_assembly: Any,
-    finished_goods: dict[str, tuple[Any, Any]],
+    finished_goods: dict[str, FinishedGoodMetadata],
     customers: dict[str, list[str]],
     models: dict[str, list[str]],
+    finished_goods_by_part: dict[str, list[str]],
 ) -> None:
     if top_assembly in (None, ""):
         return
 
-    customer, model = finished_goods.get(str(top_assembly).strip(), (None, None))
-    _append_unique(customers[part_no], customer)
-    _append_unique(models[part_no], model)
+    metadata = finished_goods.get(str(top_assembly).strip())
+    if metadata is None:
+        return
+
+    _append_unique(customers[part_no], metadata.customer)
+    _append_unique(models[part_no], metadata.model)
+    _append_unique(finished_goods_by_part[part_no], metadata.finished_good)
 
 
 def _is_replacement_marker(value: Any) -> bool:
@@ -268,3 +297,9 @@ def _join_limited(values: list[str], limit: int = 6) -> str | None:
     if len(values) <= limit:
         return "/".join(values)
     return "/".join(values[:limit]) + f"/+{len(values) - limit} more"
+
+
+def _join_all(values: list[str]) -> str | None:
+    if not values:
+        return None
+    return "/".join(values)
