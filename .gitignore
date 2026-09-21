@@ -15,3 +15,15 @@ output/*
 !output/AVTC/.gitkeep
 !output/RAKEN/
 !output/RAKEN/.gitkeep
+
+# Ignore real input/output Excel files under customer folders
+input/AVTC/*
+input/RAKEN/*
+output/AVTC/*
+output/RAKEN/*
+
+# Keep folder placeholders
+!input/AVTC/.gitkeep
+!input/RAKEN/.gitkeep
+!output/AVTC/.gitkeep
+!output/RAKEN/.gitkeep
