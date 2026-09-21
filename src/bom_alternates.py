@@ -49,6 +49,17 @@ class BomAlternates:
     def model_summary(self, parts: list[str]) -> str | None:
         return _join_all(_unique_values(self.models_by_part, parts))
 
+    def primary_model_for(
+        self,
+        part_no: str,
+        known_parts: set[str] | None = None,
+        active_parts: set[str] | None = None,
+    ) -> str | None:
+        segment = self._best_segment_for(part_no, known_parts or set(), active_parts or set())
+        if segment and segment.model:
+            return segment.model
+        return _first_value(_unique_values(self.models_by_part, [part_no]))
+
     def model_remark_summary(self, parts: list[str]) -> str | None:
         return _join_all(_unique_values(self.finished_goods_by_part, parts))
 
@@ -303,3 +314,9 @@ def _join_all(values: list[str]) -> str | None:
     if not values:
         return None
     return "/".join(values)
+
+
+def _first_value(values: list[str]) -> str | None:
+    if not values:
+        return None
+    return values[0]

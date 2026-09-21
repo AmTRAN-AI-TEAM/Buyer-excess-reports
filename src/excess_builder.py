@@ -98,7 +98,11 @@ def build_excess_rows(
 
         main_record = _first_record(displayed_parts, records_by_part)
         customer = alternates.customer_summary(displayed_parts)
-        model = alternates.model_summary(displayed_parts)
+        model = alternates.primary_model_for(
+            record.part_no,
+            known_parts=known_parts,
+            active_parts=active_parts,
+        )
         model_remark = alternates.model_remark_summary(displayed_parts)
 
         prepared_rows.append(
