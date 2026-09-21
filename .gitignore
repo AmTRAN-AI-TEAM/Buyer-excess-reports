@@ -4,6 +4,14 @@ __pycache__/
 
 input/*
 !input/.gitkeep
+!input/AVTC/
+!input/AVTC/.gitkeep
+!input/RAKEN/
+!input/RAKEN/.gitkeep
 
 output/*
 !output/.gitkeep
+!output/AVTC/
+!output/AVTC/.gitkeep
+!output/RAKEN/
+!output/RAKEN/.gitkeep

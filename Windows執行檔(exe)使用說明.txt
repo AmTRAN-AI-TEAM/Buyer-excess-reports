@@ -1,0 +1,47 @@
+Buyer Excess Reports Windows 執行檔使用說明
+
+一、資料夾結構
+
+請保持整個 BuyerExcessReports 資料夾放在一起，不要只單獨移動 exe。
+
+BuyerExcessReports/
+  BuyerExcessReports.exe
+  _internal/
+  input/
+    AVTC/
+    RAKEN/
+  output/
+    AVTC/
+    RAKEN/
+  Windows執行檔(exe)使用說明.txt
+
+二、輸入檔
+
+請將來源檔放進對應客戶資料夾。
+
+每個客戶資料夾內需要：
+  1. BOM.xlsx
+  2. 一份含有 shortage 分頁的 Excel 檔
+
+範例：
+  input/RAKEN/BOM.xlsx
+  input/RAKEN/AVTC TV excess 20260910.xlsx
+
+shortage 分頁名稱只要包含 shortage 字樣即可，不需要有 Excess sheet。
+
+三、使用步驟
+
+1. 關閉已開啟的輸出檔，避免 Excel 鎖住檔案。
+2. 雙擊 BuyerExcessReports.exe。
+3. 在視窗選擇 AVTC 或 RAKEN。
+4. 等待 console 的 tqdm 進度條跑完並顯示 Done。
+5. 到對應 output 資料夾取得報表：
+   output/AVTC/excess_report.xlsx
+   output/RAKEN/excess_report.xlsx
+
+四、注意事項
+
+1. 如果收到的是 zip 壓縮檔，請先完整解壓縮，不要在壓縮檔視窗內直接雙擊 exe。
+2. 若 Windows 顯示 SmartScreen 警告，請確認檔案來源可信後，點「更多資訊」再點「仍要執行」。
+3. 若顯示無法寫入 output，請確認輸出檔沒有被 Excel 開著。
+4. 輸出的 Excess sheet 會將數值欄負數以紅色顯示。

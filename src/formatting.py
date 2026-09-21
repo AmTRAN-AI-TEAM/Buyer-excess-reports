@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 
 DEFAULT_FONT_NAME = "Microsoft YaHei"
 DEFAULT_FONT_SIZE = 9
+NEGATIVE_RED_NUMBER_FORMAT = "#,##0.00;[Red]-#,##0.00"
 
 
 def write_excess_workbook(
@@ -121,7 +122,7 @@ def _apply_layout(
     for column, header in enumerate(row2_headers, start=1):
         if _is_numeric_header(header):
             for row in range(3, last_row + 1):
-                worksheet.cell(row, column).number_format = "#,##0.00"
+                worksheet.cell(row, column).number_format = NEGATIVE_RED_NUMBER_FORMAT
 
     for column in range(1, part_column_count + 1):
         for row in range(3, last_row + 1):

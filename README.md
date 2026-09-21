@@ -9,7 +9,11 @@
 ```text
 buyer-excess-reports/
   input/
+    AVTC/
+    RAKEN/
   output/
+    AVTC/
+    RAKEN/
   src/
 ```
 
@@ -24,11 +28,14 @@ pip install -r requirements.txt
 
 ## 使用
 
-把輸入檔放進 `input/`：
+把輸入檔放進對應客戶資料夾：
 
 ```text
-input/BOM.xlsx
-input/你的shortage檔.xlsx
+input/RAKEN/BOM.xlsx
+input/RAKEN/你的shortage檔.xlsx
+
+input/AVTC/BOM.xlsx
+input/AVTC/你的shortage檔.xlsx
 ```
 
 shortage 檔內只要有分頁名稱包含 `shortage`，程式就會使用該分頁。輸入檔不需要有 `Excess` sheet。
@@ -39,10 +46,27 @@ shortage 檔內只要有分頁名稱包含 `shortage`，程式就會使用該分
 python3 src/main.py
 ```
 
+程式會先讓你選擇 `AVTC` 或 `RAKEN`，再讀取對應的 `input/<客戶>/`，並在執行時顯示 `tqdm` 進度條。
+
 輸出：
 
 ```text
-output/excess_report.xlsx
+output/RAKEN/excess_report.xlsx
+output/AVTC/excess_report.xlsx
+```
+
+也可以直接用參數指定客戶，略過互動選擇：
+
+```bash
+python3 src/main.py --customer RAKEN
+python3 src/main.py --customer AVTC
+```
+
+客戶模式會分別讀取：
+
+```text
+input/RAKEN/ -> output/RAKEN/excess_report.xlsx
+input/AVTC/  -> output/AVTC/excess_report.xlsx
 ```
 
 ## 目前產出邏輯
@@ -59,12 +83,34 @@ output/excess_report.xlsx
 - `Customer`、`MODEL`、`MODELRemark/机种` 會從 BOM 的 `成品料号` sheet 帶出；`MODEL` 使用選定 BOM 替代料區段對應的 C 欄主 Model，`MODELRemark/机种` 使用 B 欄並完整列出。
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補 `Price（USD)` 或前版金額時可自動重算。
 - 金額公式若受到缺少來源欄位影響，會先顯示空白；例如 `Price（USD)` 空白時，`Excess stockAmount`、`Excess POAmount`、`Excess TotalAMT` 會保持空白，避免把資料不足誤判成金額為 0。
-- 輸出的 Excel 會套用 `Microsoft YaHei` 9 號字體。
+- 輸出的 Excel 會套用 `Microsoft YaHei` 9 號字體，數值欄負數會以紅色顯示。
+
+## Windows 執行檔
+
+在 Windows 上可執行：
+
+```bat
+build_exe.bat
+```
+
+打包完成後會產生：
+
+```text
+release/BuyerExcessReports/BuyerExcessReports.exe
+```
+
+使用者收到整個 `BuyerExcessReports` 資料夾後，只要把檔案放進 `input/AVTC` 或 `input/RAKEN`，再雙擊 exe 並選擇客戶即可。
 
 ## 自訂路徑
 
-也可以指定輸入與輸出：
+也可以指定輸入與輸出；指定自訂路徑時不會強制要求選客戶：
 
 ```bash
 python3 src/main.py --input-dir /path/to/input --output-file /path/to/excess_report.xlsx
+```
+
+如需關閉進度顯示，可加上：
+
+```bash
+python3 src/main.py --customer RAKEN --no-progress
 ```
