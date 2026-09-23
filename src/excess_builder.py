@@ -43,12 +43,12 @@ class ExcessBuildResult:
 class _PreparedExcessRow:
     parts: list[str]
     main_record: ShortageRecord
-    overshortage_values: list[float]
-    wo_values: list[float]
-    open_po_values: list[float]
-    overshortage_total: float
-    wo_total: float
-    open_po_total: float
+    overshortage_values: list[int]
+    wo_values: list[int]
+    open_po_values: list[int]
+    overshortage_total: int
+    wo_total: int
+    open_po_total: int
     customer: str | None
     model: str | None
     model_remark: str | None
@@ -253,15 +253,15 @@ def _row_formulas(
     previous_total = _cell_ref(row2_headers, "Previous Excess Total AMT", row_number)
 
     return {
-        "overshortage_total": f"=SUM({overshortage_first}:{overshortage_last})",
-        "wo_total": f"=SUM({wo_first}:{wo_last})",
-        "open_po_total": f"=SUM({open_po_first}:{open_po_last})",
-        "stock_qty": f"={overshortage_total}-{wo_total}",
-        "stock_amount": f'=IF({price}="","",IF({stock_qty}<0,0,{stock_qty}*{price}))',
-        "po_qty": f"=IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total})",
-        "po_amount": f'=IF({price}="","",IF({po_qty}>0,{po_qty}*{price},0))',
-        "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),"",{po_amount}+{stock_amount})',
-        "improve": f'=IF(OR({total_amount}="",{previous_total}=""),"",{total_amount}-{previous_total})',
+        "overshortage_total": f"=ROUND(SUM({overshortage_first}:{overshortage_last}),0)",
+        "wo_total": f"=ROUND(SUM({wo_first}:{wo_last}),0)",
+        "open_po_total": f"=ROUND(SUM({open_po_first}:{open_po_last}),0)",
+        "stock_qty": f"=ROUND({overshortage_total}-{wo_total},0)",
+        "stock_amount": f'=IF({price}="","",ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
+        "po_qty": f"=ROUND(IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total}),0)",
+        "po_amount": f'=IF({price}="","",ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
+        "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),"",ROUND({po_amount}+{stock_amount},0))',
+        "improve": f'=IF(OR({total_amount}="",{previous_total}=""),"",ROUND({total_amount}-{previous_total},0))',
     }
 
 
@@ -324,11 +324,17 @@ def _metric(
     records_by_part: dict[str, ShortageRecord],
     part: str,
     field_name: str,
-) -> float:
+) -> int:
     record = records_by_part.get(part)
     if record is None:
-        return 0.0
-    return float(getattr(record, field_name))
+        return 0
+    return _round_integer(float(getattr(record, field_name)))
+
+
+def _round_integer(value: float) -> int:
+    if value >= 0:
+        return int(value + 0.5)
+    return int(value - 0.5)
 
 
 def _pad(values: list[Any], length: int, fill: Any = None) -> list[Any]:

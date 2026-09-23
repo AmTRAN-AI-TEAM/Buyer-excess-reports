@@ -37,6 +37,7 @@ class Progress:
         self.total = total
         self.enabled = enabled
         self.current = 0
+        self.active_label: str | None = None
         self.bar = None
 
     def __enter__(self) -> "Progress":
@@ -51,10 +52,10 @@ class Progress:
         return self
 
     def step(self, label: str) -> None:
-        self.current += 1
+        self._complete_active_step()
+        self.active_label = label
         if self.bar is not None:
             self.bar.set_description_str(label)
-            self.bar.update(1)
             return
 
         if self.enabled:
@@ -67,8 +68,32 @@ class Progress:
             print(message)
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is None:
+            self.finish()
         if self.bar is not None:
             self.bar.close()
+
+    def finish(self) -> None:
+        self._complete_active_step()
+        self.active_label = None
+        if self.current < self.total:
+            remaining = self.total - self.current
+            self.current = self.total
+            if self.bar is not None:
+                self.bar.update(remaining)
+
+        if self.bar is not None:
+            self.bar.set_description_str("Done")
+        elif self.enabled:
+            print(f"[{self.current}/{self.total}] Done", flush=True)
+
+    def _complete_active_step(self) -> None:
+        if self.active_label is None or self.current >= self.total:
+            return
+
+        self.current += 1
+        if self.bar is not None:
+            self.bar.update(1)
 
 
 def is_frozen_app() -> bool:

@@ -30,7 +30,7 @@ class BomAlternates:
     first_seen_order: dict[str, int]
     customers_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     models_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    finished_goods_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    model_remarks_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def ordered_group_for(
         self,
@@ -61,7 +61,7 @@ class BomAlternates:
         return _first_value(_unique_values(self.models_by_part, [part_no]))
 
     def model_remark_summary(self, parts: list[str]) -> str | None:
-        return _join_all(_unique_values(self.finished_goods_by_part, parts))
+        return _join_all(_unique_values(self.model_remarks_by_part, parts))
 
     def _best_segment_for(
         self,
@@ -94,7 +94,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     first_seen: dict[str, int] = {}
     customers: dict[str, list[str]] = defaultdict(list)
     models: dict[str, list[str]] = defaultdict(list)
-    finished_goods_by_part: dict[str, list[str]] = defaultdict(list)
+    model_remarks: dict[str, list[str]] = defaultdict(list)
     segments: list[BomAlternateSegment] = []
 
     current_context: tuple[Any, Any, Any] | None = None
@@ -107,6 +107,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
 
     for row_number, row in enumerate(bom_ws.iter_rows(min_row=2, values_only=True), start=2):
         top_assembly = row[0] if len(row) > 0 else None
+        model_remark = row[1] if len(row) > 1 else None
         bill_level = row[2] if len(row) > 2 else None
         assembly_item = row[3] if len(row) > 3 else None
         item_seq = row[6] if len(row) > 6 else None
@@ -126,8 +127,8 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
             finished_goods,
             customers,
             models,
-            finished_goods_by_part,
         )
+        _append_unique(model_remarks[part_no], model_remark)
 
         context = (top_assembly, bill_level, assembly_item)
         if _is_replacement_marker(item_seq):
@@ -175,9 +176,9 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         first_seen_order=first_seen,
         customers_by_part={key: tuple(values) for key, values in customers.items()},
         models_by_part={key: tuple(values) for key, values in models.items()},
-        finished_goods_by_part={
+        model_remarks_by_part={
             key: tuple(values)
-            for key, values in finished_goods_by_part.items()
+            for key, values in model_remarks.items()
         },
     )
 
@@ -259,7 +260,6 @@ def _collect_finished_good_metadata(
     finished_goods: dict[str, FinishedGoodMetadata],
     customers: dict[str, list[str]],
     models: dict[str, list[str]],
-    finished_goods_by_part: dict[str, list[str]],
 ) -> None:
     if top_assembly in (None, ""):
         return
@@ -270,7 +270,6 @@ def _collect_finished_good_metadata(
 
     _append_unique(customers[part_no], metadata.customer)
     _append_unique(models[part_no], metadata.model)
-    _append_unique(finished_goods_by_part[part_no], metadata.finished_good)
 
 
 def _is_replacement_marker(value: Any) -> bool:
