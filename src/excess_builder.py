@@ -260,8 +260,8 @@ def _row_formulas(
         "stock_amount": f'=IF({price}="","",ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
         "po_qty": f"=ROUND(IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total}),0)",
         "po_amount": f'=IF({price}="","",ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
-        "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),"",ROUND({po_amount}+{stock_amount},0))',
-        "improve": f'=IF(OR({total_amount}="",{previous_total}=""),"",ROUND({total_amount}-{previous_total},0))',
+        "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),-1,ROUND({po_amount}+{stock_amount},0))',
+        "improve": f'=IF(OR({total_amount}<0,{previous_total}=""),"",ROUND({total_amount}-{previous_total},0))',
     }
 
 

@@ -12,6 +12,7 @@ DEFAULT_FONT_NAME = "Microsoft YaHei"
 DEFAULT_FONT_SIZE = 9
 NEGATIVE_RED_INTEGER_FORMAT = "#,##0;[Red]-#,##0"
 NEGATIVE_RED_DECIMAL_FORMAT = "#,##0.00;[Red]-#,##0.00"
+TOTAL_AMOUNT_SORT_FORMAT = "#,##0;;0"
 
 
 def write_excess_workbook(
@@ -54,6 +55,7 @@ def _apply_layout(
         end_column=excess_end,
     )
     worksheet.auto_filter.ref = f"A2:{last_column_letter}{max(last_row, 2)}"
+    _apply_total_amount_sort(worksheet, row2_headers, last_row)
     worksheet.freeze_panes = "A3"
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -125,6 +127,8 @@ def _apply_layout(
             number_format = (
                 NEGATIVE_RED_DECIMAL_FORMAT
                 if header == "Price（USD)"
+                else TOTAL_AMOUNT_SORT_FORMAT
+                if header == "Excess\nTotalAMT"
                 else NEGATIVE_RED_INTEGER_FORMAT
             )
             for row in range(3, last_row + 1):
@@ -137,6 +141,22 @@ def _apply_layout(
 
 def _column_index(headers: list[str], header: str) -> int:
     return headers.index(header) + 1
+
+
+def _apply_total_amount_sort(
+    worksheet: Any,
+    row2_headers: list[str],
+    last_row: int,
+) -> None:
+    if last_row < 3:
+        return
+
+    total_amount_column = _column_index(row2_headers, "Excess\nTotalAMT")
+    total_amount_letter = get_column_letter(total_amount_column)
+    worksheet.auto_filter.add_sort_condition(
+        f"{total_amount_letter}3:{total_amount_letter}{last_row}",
+        descending=True,
+    )
 
 
 def _is_numeric_header(header: str) -> bool:

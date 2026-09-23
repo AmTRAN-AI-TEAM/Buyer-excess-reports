@@ -83,8 +83,9 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx
 - `Customer`、`MODEL` 會從 BOM 的 `成品料号` sheet 帶出；`MODEL` 使用選定 BOM 替代料區段對應的 C 欄主 Model。
 - `MODELRemark/机种` 會從輸入 `BOM.xlsx` 的 `BOM` sheet B 欄帶出，並依輸出列的料號群組完整列出。
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補 `Price（USD)` 或前版金額時可自動重算。
-- 金額公式若受到缺少來源欄位影響，會先顯示空白；例如 `Price（USD)` 空白時，`Excess stockAmount`、`Excess POAmount`、`Excess TotalAMT` 會保持空白，避免把資料不足誤判成金額為 0。
+- 金額公式若受到缺少來源欄位影響，會先顯示空白；例如 `Price（USD)` 空白時，`Excess stockAmount`、`Excess POAmount`、`Excess TotalAMT` 會顯示空白，避免把資料不足誤判成金額為 0。
 - 數量與金額運算結果會四捨五入到整數輸出；`Price（USD)` 保留兩位小數供後續補單價。
+- `Excess TotalAMT` 會以由高到低排序；沒有價格而顯示空白的列會排在最後。
 - 輸出的 Excel 會套用 `Microsoft YaHei` 9 號字體，數值欄負數會以紅色顯示。
 
 ## Windows 執行檔
