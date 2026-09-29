@@ -25,6 +25,20 @@ class FinishedGoodMetadata:
     model: str | None
 
 
+@dataclass(frozen=True)
+class IncompleteAlternateDetail:
+    model: str | None
+    part_no: str
+    spec: str | None
+
+
+@dataclass(frozen=True)
+class IncompleteAlternateGroup:
+    base_part: str
+    rejected_parts: tuple[str, ...]
+    details: tuple[IncompleteAlternateDetail, ...]
+
+
 @dataclass
 class BomAlternates:
     segments_by_part: dict[str, tuple[BomAlternateSegment, ...]]
@@ -32,6 +46,7 @@ class BomAlternates:
     customers_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     models_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     model_remarks_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    incomplete_alternate_groups: tuple[IncompleteAlternateGroup, ...] = ()
 
     def ordered_group_for(
         self,
@@ -96,6 +111,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     customers: dict[str, list[str]] = defaultdict(list)
     models: dict[str, list[str]] = defaultdict(list)
     model_remarks: dict[str, list[str]] = defaultdict(list)
+    specs: dict[str, list[str]] = defaultdict(list)
     segments: list[BomAlternateSegment] = []
     base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]] = defaultdict(set)
 
@@ -114,11 +130,13 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         assembly_item = row[3] if len(row) > 3 else None
         item_seq = row[6] if len(row) > 6 else None
         component = row[7] if len(row) > 7 else None
+        component_description = row[8] if len(row) > 8 else None
 
         if component in (None, ""):
             continue
 
         part_no = str(component).strip()
+        context = (top_assembly, bill_level, assembly_item)
         if part_no not in first_seen:
             first_seen[part_no] = order
             order += 1
@@ -131,8 +149,8 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
             models,
         )
         _append_unique(model_remarks[part_no], model_remark)
+        _append_unique(specs[part_no], component_description)
 
-        context = (top_assembly, bill_level, assembly_item)
         if _is_replacement_marker(item_seq):
             if current_base and current_context == context:
                 current_parts.append(part_no)
@@ -166,7 +184,12 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         current_customer,
         current_model,
     )
-    segments = _strict_usage_context_segments(segments, base_usage_contexts)
+    segments, incomplete_alternate_groups = _strict_usage_context_segments(
+        segments,
+        base_usage_contexts,
+        model_remarks,
+        specs,
+    )
 
     segments_by_part: dict[str, list[BomAlternateSegment]] = defaultdict(list)
     for segment in segments:
@@ -186,6 +209,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
             key: tuple(values)
             for key, values in model_remarks.items()
         },
+        incomplete_alternate_groups=incomplete_alternate_groups,
     )
 
 
@@ -252,15 +276,20 @@ def _append_segment(
 def _strict_usage_context_segments(
     segments: list[BomAlternateSegment],
     base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]],
-) -> list[BomAlternateSegment]:
+    model_remarks_by_part: dict[str, list[str]],
+    specs_by_part: dict[str, list[str]],
+) -> tuple[list[BomAlternateSegment], tuple[IncompleteAlternateGroup, ...]]:
     replacement_contexts: dict[tuple[str, str], set[tuple[Any, Any, Any]]] = defaultdict(set)
     for segment in segments:
         for replacement in segment.parts[1:]:
             replacement_contexts[(segment.base_part, replacement)].add(segment.context)
 
     strict_segments: list[BomAlternateSegment] = []
+    incomplete_groups: list[IncompleteAlternateGroup] = []
+    seen_incomplete_groups: set[tuple[str, tuple[str, ...]]] = set()
     for segment in segments:
         strict_parts = [segment.base_part]
+        rejected_parts: list[str] = []
         for replacement in segment.parts[1:]:
             if _replacement_covers_all_base_contexts(
                 segment.base_part,
@@ -269,6 +298,25 @@ def _strict_usage_context_segments(
                 replacement_contexts,
             ):
                 strict_parts.append(replacement)
+            else:
+                rejected_parts.append(replacement)
+
+        if rejected_parts:
+            key = (segment.base_part, tuple(rejected_parts))
+            if key not in seen_incomplete_groups:
+                seen_incomplete_groups.add(key)
+                incomplete_groups.append(
+                    IncompleteAlternateGroup(
+                        base_part=segment.base_part,
+                        rejected_parts=tuple(rejected_parts),
+                        details=_incomplete_alternate_details(
+                            segment.base_part,
+                            tuple(rejected_parts),
+                            model_remarks_by_part,
+                            specs_by_part,
+                        ),
+                    )
+                )
 
         if len(strict_parts) <= 1:
             continue
@@ -284,8 +332,30 @@ def _strict_usage_context_segments(
             )
         )
 
-    return strict_segments
+    return strict_segments, tuple(incomplete_groups)
 
+
+def _incomplete_alternate_details(
+    base_part: str,
+    rejected_parts: tuple[str, ...],
+    model_remarks_by_part: dict[str, list[str]],
+    specs_by_part: dict[str, list[str]],
+) -> tuple[IncompleteAlternateDetail, ...]:
+    details: list[IncompleteAlternateDetail] = []
+    seen_parts: set[str] = set()
+    for part_no in (base_part, *rejected_parts):
+        if part_no in seen_parts:
+            continue
+        seen_parts.add(part_no)
+        details.append(
+            IncompleteAlternateDetail(
+                model=_join_all(model_remarks_by_part.get(part_no, [])),
+                part_no=part_no,
+                spec=_first_value(specs_by_part.get(part_no, [])),
+            )
+        )
+
+    return tuple(details)
 
 
 def _replacement_covers_all_base_contexts(

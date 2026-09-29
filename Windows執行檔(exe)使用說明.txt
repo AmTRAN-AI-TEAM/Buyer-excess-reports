@@ -39,7 +39,9 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 4. 等待 console 的 tqdm 進度條跑完並顯示 Done。
 5. 到對應 output 資料夾取得報表：
    output/AVTC/excess_report.xlsx
+   output/AVTC/incomplete_alternates.xlsx
    output/RAKEN/excess_report.xlsx
+   output/RAKEN/incomplete_alternates.xlsx
 
 四、注意事項
 
@@ -50,3 +52,4 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 5. Price 會使用 Price sheet 的 Uprice；同料號多筆資料時優先取 Allocation 最大的那筆。
 6. RAKEN 輸出會在第一個 Excess 區塊前保留兩個空白直欄。
 7. 替代料採嚴格 BOM 使用情境規則；若主料在其他 BOM 使用情境沒有同一替代料，該替代關係不會合併。
+8. 不完全替代明細會另外輸出 incomplete_alternates.xlsx；每個不完全替代群組內，同一料號只列一行，Model 會彙總該料號在 BOM B 欄出現過的所有機種，Spec 來源為 BOM 的 COMPONENT_DESCRIPTION 第一個非空值。

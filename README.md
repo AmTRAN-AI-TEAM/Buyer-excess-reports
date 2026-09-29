@@ -54,7 +54,9 @@ python3 src/main.py
 
 ```text
 output/RAKEN/excess_report.xlsx
+output/RAKEN/incomplete_alternates.xlsx
 output/AVTC/excess_report.xlsx
+output/AVTC/incomplete_alternates.xlsx
 ```
 
 也可以直接用參數指定客戶，略過互動選擇：
@@ -64,11 +66,11 @@ python3 src/main.py --customer RAKEN
 python3 src/main.py --customer AVTC
 ```
 
-客戶模式會分別讀取：
+客戶模式會分別讀取與輸出：
 
 ```text
-input/RAKEN/ -> output/RAKEN/excess_report.xlsx
-input/AVTC/  -> output/AVTC/excess_report.xlsx
+input/RAKEN/ -> output/RAKEN/excess_report.xlsx + output/RAKEN/incomplete_alternates.xlsx
+input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/incomplete_alternates.xlsx
 ```
 
 ## 目前產出邏輯
@@ -79,6 +81,7 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx
 - 若找不到 `Overshortage1`，會用 `OVER_SHORTAGE + HLD` 當替代。
 - 從 BOM 的 G 欄判斷候選替代料：非 `*R*` 是主料，後續同一 BOM 區段連續 `*R*` 是候選替代料。
 - 替代料採嚴格 BOM 使用情境規則：同一替代料必須出現在主料所有 BOM 使用情境中，才會保留在同一組；若主料在其他 BOM 使用情境沒有該替代料，該替代關係會被拆開。
+- 被嚴格規則拆開的候選替代關係會另外輸出 `incomplete_alternates.xlsx`，欄位包含 Item、Model、Part No、Spec；每個不完全替代群組內，同一料號只列一行，Model 會彙總該料號在 BOM B 欄出現過的所有機種，Spec 來源為 BOM 的 `COMPONENT_DESCRIPTION` 第一個非空值。
 - 替代料不做跨機種/跨 BOM 區段的全域串聯；同一料號若在多個合格 BOM 區段出現，程式會挑選最適合目前 shortage 料號的一個區段。
 - 已經被某一列 Excess 使用過的 shortage 料號，不會在後續列重複加總。
 - 程式會先偵測所有 Excess 列需要的最大料號數，動態產出 `PartNo1` 到 `替代料N`。

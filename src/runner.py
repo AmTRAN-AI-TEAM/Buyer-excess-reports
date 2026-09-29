@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 from bom_alternates import load_bom_alternates
 from excess_builder import build_excess_rows
 from formatting import write_excess_workbook
+from incomplete_alternates import write_incomplete_alternates_workbook
 from workbook_io import (
     find_bom_file,
     find_item_file,
@@ -24,7 +25,7 @@ from workbook_io import (
 
 
 CUSTOMERS = ("AVTC", "RAKEN")
-PROGRESS_STEPS = 8
+PROGRESS_STEPS = 9
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class RunResult:
     shortage_file: Path
     shortage_sheet: str
     output_file: Path
+    incomplete_alternates_file: Path
     input_part_count: int
     output_row_count: int
     part_column_count: int
@@ -164,10 +166,19 @@ def generate_report(
             result.part_column_count,
         )
 
+        progress.step("Write incomplete alternates file")
+        incomplete_alternates_file = output_file.with_name("incomplete_alternates.xlsx")
+        write_incomplete_alternates_workbook(
+            alternates.incomplete_alternate_groups,
+            incomplete_alternates_file,
+        )
+
         progress.message(f"Read shortage parts: {result.input_part_count}")
         progress.message(f"Generated Excess rows: {result.output_row_count}")
         progress.message(f"Part columns: {result.part_column_count}")
+        progress.message(f"Incomplete alternate groups: {len(alternates.incomplete_alternate_groups)}")
         progress.message(f"Output: {output_file}")
+        progress.message(f"Incomplete alternates: {incomplete_alternates_file}")
 
     return RunResult(
         bom_file=bom_file,
@@ -175,6 +186,7 @@ def generate_report(
         shortage_file=shortage_source.path,
         shortage_sheet=shortage_source.sheet_name,
         output_file=output_file,
+        incomplete_alternates_file=incomplete_alternates_file,
         input_part_count=result.input_part_count,
         output_row_count=result.output_row_count,
         part_column_count=result.part_column_count,
