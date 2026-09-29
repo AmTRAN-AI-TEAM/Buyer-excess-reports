@@ -77,8 +77,9 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx
 - 讀取 `shortage` 的 `Overshortage1`、`PO_REMAIN`，以及 Part No 前方所有 `WO外demand` 欄位。
 - 多個 `WO外demand` 欄位會依上一列表頭作為時間區間，例如 `cover Jan'28`、`cover 'Dec`、`cover 'Jun`，並在輸出中展開對應的 WO demand 與 Excess 區塊。
 - 若找不到 `Overshortage1`，會用 `OVER_SHORTAGE + HLD` 當替代。
-- 從 BOM 的 G 欄判斷替代料：非 `*R*` 是主料，後續同一 BOM 區段連續 `*R*` 是替代料。
-- 替代料不做跨機種/跨 BOM 區段的全域串聯；同一料號若在多個 BOM 區段出現，程式會挑選最適合目前 shortage 料號的一個區段。
+- 從 BOM 的 G 欄判斷候選替代料：非 `*R*` 是主料，後續同一 BOM 區段連續 `*R*` 是候選替代料。
+- 替代料採嚴格 BOM 使用情境規則：同一替代料必須出現在主料所有 BOM 使用情境中，才會保留在同一組；若主料在其他 BOM 使用情境沒有該替代料，該替代關係會被拆開。
+- 替代料不做跨機種/跨 BOM 區段的全域串聯；同一料號若在多個合格 BOM 區段出現，程式會挑選最適合目前 shortage 料號的一個區段。
 - 已經被某一列 Excess 使用過的 shortage 料號，不會在後續列重複加總。
 - 程式會先偵測所有 Excess 列需要的最大料號數，動態產出 `PartNo1` 到 `替代料N`。
 - `OvershortageN`、各時間區間的 `WO 外demandN`、`Open poN` 也會跟著 `替代料N` 自動增加。

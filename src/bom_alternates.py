@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 @dataclass(frozen=True)
 class BomAlternateSegment:
     row_number: int
+    context: tuple[Any, Any, Any]
     parts: tuple[str, ...]
     base_part: str
     customer: str | None
@@ -96,6 +97,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     models: dict[str, list[str]] = defaultdict(list)
     model_remarks: dict[str, list[str]] = defaultdict(list)
     segments: list[BomAlternateSegment] = []
+    base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]] = defaultdict(set)
 
     current_context: tuple[Any, Any, Any] | None = None
     current_base: str | None = None
@@ -136,9 +138,11 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
                 current_parts.append(part_no)
             continue
 
+        base_usage_contexts[part_no].add(context)
         _append_segment(
             segments,
             current_base_row,
+            current_context,
             current_base,
             current_parts,
             current_customer,
@@ -156,11 +160,13 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     _append_segment(
         segments,
         current_base_row,
+        current_context,
         current_base,
         current_parts,
         current_customer,
         current_model,
     )
+    segments = _strict_usage_context_segments(segments, base_usage_contexts)
 
     segments_by_part: dict[str, list[BomAlternateSegment]] = defaultdict(list)
     for segment in segments:
@@ -217,12 +223,13 @@ def _load_finished_goods(workbook: Any) -> dict[str, FinishedGoodMetadata]:
 def _append_segment(
     segments: list[BomAlternateSegment],
     row_number: int | None,
+    context: tuple[Any, Any, Any] | None,
     base_part: str | None,
     parts: list[str],
     customer: str | None,
     model: str | None,
 ) -> None:
-    if row_number is None or base_part is None or len(parts) <= 1:
+    if row_number is None or context is None or base_part is None or len(parts) <= 1:
         return
 
     unique_parts: list[str] = []
@@ -233,12 +240,64 @@ def _append_segment(
     segments.append(
         BomAlternateSegment(
             row_number=row_number,
+            context=context,
             parts=tuple(unique_parts),
             base_part=base_part,
             customer=customer,
             model=model,
         )
     )
+
+
+def _strict_usage_context_segments(
+    segments: list[BomAlternateSegment],
+    base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]],
+) -> list[BomAlternateSegment]:
+    replacement_contexts: dict[tuple[str, str], set[tuple[Any, Any, Any]]] = defaultdict(set)
+    for segment in segments:
+        for replacement in segment.parts[1:]:
+            replacement_contexts[(segment.base_part, replacement)].add(segment.context)
+
+    strict_segments: list[BomAlternateSegment] = []
+    for segment in segments:
+        strict_parts = [segment.base_part]
+        for replacement in segment.parts[1:]:
+            if _replacement_covers_all_base_contexts(
+                segment.base_part,
+                replacement,
+                base_usage_contexts,
+                replacement_contexts,
+            ):
+                strict_parts.append(replacement)
+
+        if len(strict_parts) <= 1:
+            continue
+
+        strict_segments.append(
+            BomAlternateSegment(
+                row_number=segment.row_number,
+                context=segment.context,
+                parts=tuple(strict_parts),
+                base_part=segment.base_part,
+                customer=segment.customer,
+                model=segment.model,
+            )
+        )
+
+    return strict_segments
+
+
+
+def _replacement_covers_all_base_contexts(
+    base_part: str,
+    replacement: str,
+    base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]],
+    replacement_contexts: dict[tuple[str, str], set[tuple[Any, Any, Any]]],
+) -> bool:
+    base_contexts = base_usage_contexts.get(base_part, set())
+    if not base_contexts:
+        return False
+    return base_contexts <= replacement_contexts.get((base_part, replacement), set())
 
 
 def _finished_good_metadata(

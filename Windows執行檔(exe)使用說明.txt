@@ -49,3 +49,4 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 4. 輸出的 Excess sheet 會將數值欄負數以紅色顯示。
 5. Price 會使用 Price sheet 的 Uprice；同料號多筆資料時優先取 Allocation 最大的那筆。
 6. RAKEN 輸出會在第一個 Excess 區塊前保留兩個空白直欄。
+7. 替代料採嚴格 BOM 使用情境規則；若主料在其他 BOM 使用情境沒有同一替代料，該替代關係不會合併。
