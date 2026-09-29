@@ -13,6 +13,13 @@ DEFAULT_FONT_SIZE = 9
 NEGATIVE_RED_INTEGER_FORMAT = "#,##0;[Red]-#,##0"
 NEGATIVE_RED_DECIMAL_FORMAT = "#,##0.00;[Red]-#,##0.00"
 TOTAL_AMOUNT_SORT_FORMAT = "#,##0;;0"
+EXCESS_BASE_HEADERS = [
+    "Excess\nstockQTY",
+    "Excess\nstockAmount",
+    "Excess\nPOQty",
+    "Excess\nPOAmount",
+    "Excess\nTotalAMT",
+]
 
 
 def write_excess_workbook(
@@ -45,15 +52,8 @@ def _apply_layout(
 ) -> None:
     last_column = len(row2_headers)
     last_column_letter = get_column_letter(last_column)
-    excess_start = _column_index(row2_headers, "Excess\nstockQTY")
-    excess_end = _column_index(row2_headers, "Excess\nTotalAMT")
 
-    worksheet.merge_cells(
-        start_row=1,
-        start_column=excess_start,
-        end_row=1,
-        end_column=excess_end,
-    )
+    _merge_excess_groups(worksheet, row2_headers)
     worksheet.auto_filter.ref = f"A2:{last_column_letter}{max(last_row, 2)}"
     _apply_total_amount_sort(worksheet, row2_headers, last_row)
     worksheet.freeze_panes = "A3"
@@ -82,12 +82,14 @@ def _apply_layout(
             cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     for cell in worksheet[1]:
-        if cell.value is not None:
+        if cell.value not in (None, ""):
             cell.fill = group_fill
             cell.font = group_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for cell in worksheet[2]:
+        if cell.value in (None, ""):
+            continue
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -113,22 +115,27 @@ def _apply_layout(
     for column in range(1, last_column + 1):
         letter = get_column_letter(column)
         header = row2_headers[column - 1]
-        worksheet.column_dimensions[letter].width = widths_by_header.get(header, 12)
+        if header in (None, ""):
+            worksheet.column_dimensions[letter].width = 4
+            continue
+        base_header = _base_header(header)
+        worksheet.column_dimensions[letter].width = widths_by_header.get(base_header, 12)
 
     for column in range(1, part_column_count + 1):
         letter = get_column_letter(column)
         worksheet.column_dimensions[letter].width = 16
 
-    worksheet.row_dimensions[1].height = 18
-    worksheet.row_dimensions[2].height = 34
+    worksheet.row_dimensions[1].height = 22
+    worksheet.row_dimensions[2].height = 42
 
     for column, header in enumerate(row2_headers, start=1):
         if _is_numeric_header(header):
+            base_header = _base_header(header)
             number_format = (
                 NEGATIVE_RED_DECIMAL_FORMAT
-                if header == "Price（USD)"
+                if base_header == "Price（USD)"
                 else TOTAL_AMOUNT_SORT_FORMAT
-                if header == "Excess\nTotalAMT"
+                if base_header == "Excess\nTotalAMT"
                 else NEGATIVE_RED_INTEGER_FORMAT
             )
             for row in range(3, last_row + 1):
@@ -139,8 +146,26 @@ def _apply_layout(
             worksheet.cell(row, column).number_format = "@"
 
 
-def _column_index(headers: list[str], header: str) -> int:
-    return headers.index(header) + 1
+def _merge_excess_groups(worksheet: Any, row2_headers: list[str]) -> None:
+    for start_column, end_column in _excess_group_ranges(row2_headers):
+        worksheet.merge_cells(
+            start_row=1,
+            start_column=start_column,
+            end_row=1,
+            end_column=end_column,
+        )
+
+
+def _excess_group_ranges(row2_headers: list[str]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    width = len(EXCESS_BASE_HEADERS)
+    for index in range(0, len(row2_headers) - width + 1):
+        if [
+            _base_header(row2_headers[index + offset])
+            for offset in range(width)
+        ] == EXCESS_BASE_HEADERS:
+            ranges.append((index + 1, index + width))
+    return ranges
 
 
 def _apply_total_amount_sort(
@@ -151,7 +176,9 @@ def _apply_total_amount_sort(
     if last_row < 3:
         return
 
-    total_amount_column = _column_index(row2_headers, "Excess\nTotalAMT")
+    total_amount_column = _first_base_column_index(row2_headers, "Excess\nTotalAMT")
+    if total_amount_column is None:
+        return
     total_amount_letter = get_column_letter(total_amount_column)
     worksheet.auto_filter.add_sort_condition(
         f"{total_amount_letter}3:{total_amount_letter}{last_row}",
@@ -159,9 +186,26 @@ def _apply_total_amount_sort(
     )
 
 
-def _is_numeric_header(header: str) -> bool:
+def _first_base_column_index(headers: list[str], base_header: str) -> int | None:
+    for index, header in enumerate(headers, start=1):
+        if _base_header(header) == base_header:
+            return index
+    return None
+
+
+def _base_header(header: Any) -> str:
+    if header in (None, ""):
+        return ""
+    parts = str(header).split("\n")
+    if parts[0] == "Excess" and len(parts) >= 2:
+        return "\n".join(parts[:2])
+    return parts[0]
+
+
+def _is_numeric_header(header: Any) -> bool:
+    base_header = _base_header(header)
     return (
-        header in {
+        base_header in {
             "LT",
             "MOQ",
             "Price（USD)",
@@ -177,7 +221,7 @@ def _is_numeric_header(header: str) -> bool:
             "Improve",
             "Previous Excess Total AMT",
         }
-        or header.startswith("Overshortage")
-        or header.startswith("WO 外demand")
-        or header.startswith("Open po")
+        or base_header.startswith("Overshortage")
+        or base_header.startswith("WO 外demand")
+        or base_header.startswith("Open po")
     )

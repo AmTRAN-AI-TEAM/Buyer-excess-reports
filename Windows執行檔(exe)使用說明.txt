@@ -20,14 +20,16 @@ BuyerExcessReports/
 請將來源檔放進對應客戶資料夾。
 
 每個客戶資料夾內需要：
-  1. BOM.xlsx
-  2. 一份含有 shortage 分頁的 Excel 檔
+  1. 檔名包含 BOM 的 Excel 檔
+  2. 檔名包含 Item 的 Excel 檔（需含 Item 與 Price sheet）
+  3. 一份含有 shortage 分頁的 Excel 檔
 
 範例：
   input/RAKEN/BOM.xlsx
+  input/RAKEN/Item.xlsx
   input/RAKEN/AVTC TV excess 20260910.xlsx
 
-shortage 分頁名稱只要包含 shortage 字樣即可，不需要有 Excess sheet。
+BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即可。shortage 分頁名稱只要包含 shortage 字樣即可，不需要有 Excess sheet。
 
 三、使用步驟
 
@@ -45,3 +47,5 @@ shortage 分頁名稱只要包含 shortage 字樣即可，不需要有 Excess sh
 2. 若 Windows 顯示 SmartScreen 警告，請確認檔案來源可信後，點「更多資訊」再點「仍要執行」。
 3. 若顯示無法寫入 output，請確認輸出檔沒有被 Excel 開著。
 4. 輸出的 Excess sheet 會將數值欄負數以紅色顯示。
+5. Price 會使用 Price sheet 的 Uprice；同料號多筆資料時優先取 Allocation 最大的那筆。
+6. RAKEN 輸出會在第一個 Excess 區塊前保留兩個空白直欄。

@@ -14,16 +14,23 @@ except Exception:  # pragma: no cover - optional dependency fallback
 from bom_alternates import load_bom_alternates
 from excess_builder import build_excess_rows
 from formatting import write_excess_workbook
-from workbook_io import find_bom_file, find_shortage_source, load_shortage_records
+from workbook_io import (
+    find_bom_file,
+    find_item_file,
+    find_shortage_source,
+    load_item_workbook_data,
+    load_shortage_records,
+)
 
 
 CUSTOMERS = ("AVTC", "RAKEN")
-PROGRESS_STEPS = 6
+PROGRESS_STEPS = 8
 
 
 @dataclass(frozen=True)
 class RunResult:
     bom_file: Path
+    item_file: Path
     shortage_file: Path
     shortage_sheet: str
     output_file: Path
@@ -110,6 +117,7 @@ def generate_report(
     input_dir: Path,
     output_file: Path,
     *,
+    customer: str | None = None,
     show_progress: bool = True,
 ) -> RunResult:
     input_dir = input_dir.resolve()
@@ -119,20 +127,33 @@ def generate_report(
         progress.step("Find BOM")
         bom_file = find_bom_file(input_dir)
 
+        progress.step("Find Item workbook")
+        item_file = find_item_file(input_dir)
+
         progress.step("Find shortage sheet")
         shortage_source = find_shortage_source(input_dir, bom_file)
 
         progress.message(f"BOM: {bom_file}")
+        progress.message(f"Item: {item_file}")
         progress.message(f"Shortage: {shortage_source.path} [{shortage_source.sheet_name}]")
 
         progress.step("Read BOM alternates")
         alternates = load_bom_alternates(bom_file)
 
+        progress.step("Read Item/Price data")
+        item_data = load_item_workbook_data(item_file)
+
         progress.step("Read shortage data")
         shortage_records = load_shortage_records(shortage_source)
 
         progress.step("Build Excess rows")
-        result = build_excess_rows(shortage_records, alternates)
+        blank_columns_before_excess = 2 if customer and customer.upper() == "RAKEN" else 0
+        result = build_excess_rows(
+            shortage_records,
+            alternates,
+            item_data,
+            blank_columns_before_excess=blank_columns_before_excess,
+        )
 
         progress.step("Write Excel file")
         write_excess_workbook(
@@ -150,6 +171,7 @@ def generate_report(
 
     return RunResult(
         bom_file=bom_file,
+        item_file=item_file,
         shortage_file=shortage_source.path,
         shortage_sheet=shortage_source.sheet_name,
         output_file=output_file,
@@ -195,7 +217,7 @@ def select_customer_window() -> str | None:
     ).grid(row=0, column=0, columnspan=2, sticky="w")
     ttk.Label(
         frame,
-        text="請先把 BOM.xlsx 與 shortage 檔放進對應 input 資料夾。",
+        text="請先把 BOM、Item 與 shortage 檔放進對應 input 資料夾。",
     ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 14))
 
     def choose(value: str) -> None:
@@ -271,7 +293,7 @@ def pause_for_windows_exe(enabled: bool) -> None:
 
 def build_parser(root: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate Buyer Excess report from BOM.xlsx and a shortage worksheet."
+        description="Generate Buyer Excess report from BOM, Item/Price, and a shortage worksheet."
     )
     parser.add_argument(
         "--customer",
@@ -336,7 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if customer:
             print(f"Customer: {customer.upper()}")
-        generate_report(input_dir, output_file, show_progress=not args.no_progress)
+        generate_report(input_dir, output_file, customer=customer, show_progress=not args.no_progress)
         print("Done.")
         return 0
     except Exception as exc:  # noqa: BLE001 - show friendly exe errors
