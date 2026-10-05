@@ -149,7 +149,7 @@ def generate_report(
         shortage_records = load_shortage_records(shortage_source)
 
         progress.step("Build Excess rows")
-        blank_columns_before_excess = 2 if customer and customer.upper() == "RAKEN" else 0
+        blank_columns_before_excess = 2 if customer and customer.upper() in CUSTOMERS else 0
         result = build_excess_rows(
             shortage_records,
             alternates,

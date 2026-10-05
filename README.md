@@ -94,7 +94,7 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/incomplete_alterna
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補前版金額時可自動重算。
 - 數量與金額運算結果會四捨五入到整數輸出；`Price（USD)` 保留兩位小數。
 - `Excess TotalAMT` 會以第一個 Excess 時間區間由高到低排序；沒有價格而顯示空白的列會排在最後。
-- RAKEN 輸出會在第一個 Excess 區塊前插入兩個空白直欄；AVTC 維持不插入。
+- AVTC 與 RAKEN 輸出都會在第一個 Excess 區塊前插入兩個空白直欄。
 - 輸出的 Excel 會套用 `Microsoft YaHei` 9 號字體，數值欄負數會以紅色顯示。
 
 ## Windows 執行檔

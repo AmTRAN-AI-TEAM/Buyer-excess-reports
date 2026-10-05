@@ -324,7 +324,7 @@ def _row_formulas(
                 "stock_amount": f'=IF({price}="","",ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
                 "po_qty": f"=ROUND(IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total}),0)",
                 "po_amount": f'=IF({price}="","",ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
-                "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),-1,ROUND({po_amount}+{stock_amount},0))',
+                "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),0,ROUND({po_amount}+{stock_amount},0))',
             }
         )
 
