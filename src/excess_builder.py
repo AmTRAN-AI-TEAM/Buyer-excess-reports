@@ -3,13 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from bom_alternates import BomAlternates
 from workbook_io import ItemWorkbookData, ShortageRecord
 
 
-INFO_HEADERS = ["Desc", "Planner", "GSD", "LT", "MOQ", "Price（USD)"]
+INFO_HEADERS = [
+    "Desc",
+    "Planner",
+    "GSD",
+    "Customer\n客户",
+    "MODEL",
+    "MODELRemark\n机种",
+    "LT",
+    "MOQ",
+    "Price（USD)",
+]
 EXCESS_METRIC_HEADERS = [
     "Excess\nstockQTY",
     "Excess\nstockAmount",
@@ -17,12 +27,18 @@ EXCESS_METRIC_HEADERS = [
     "Excess\nPOAmount",
     "Excess\nTotalAMT",
 ]
+OTHER_DEMAND_HEADER = "others demand"
+PO_OUTSIDE_STOCK_HEADER = "PO外備料"
+PO_OUTSIDE_QTY_HEADER = "PO外備料QTY"
+PO_OUTSIDE_AMOUNT_HEADER = "PO外備料AMT"
+PO_OUTSIDE_HEADERS = [
+    PO_OUTSIDE_STOCK_HEADER,
+    PO_OUTSIDE_QTY_HEADER,
+    PO_OUTSIDE_AMOUNT_HEADER,
+]
 TRAILING_HEADERS = [
     "Vendor",
     "reason&action",
-    "Customer\n客户",
-    "MODEL",
-    "MODELRemark\n机种",
     "Category\n分类",
     "Improve",
     "Previous Excess Total AMT",
@@ -41,6 +57,21 @@ class ExcessBuildResult:
     input_part_count: int
     output_row_count: int
     demand_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PreviousExcessTotals:
+    totals_by_part: dict[str, float]
+    totals_by_group: dict[tuple[str, ...], float]
+
+    def total_for(self, parts: list[str]) -> float | None:
+        part_key = _part_key(parts[0]) if parts else None
+        if part_key and part_key in self.totals_by_part:
+            return self.totals_by_part[part_key]
+        group_key = _parts_group_key(parts)
+        if group_key:
+            return self.totals_by_group.get(group_key)
+        return None
 
 
 @dataclass(frozen=True)
@@ -65,8 +96,12 @@ def build_excess_rows(
     item_data: ItemWorkbookData | None = None,
     *,
     blank_columns_before_excess: int = 0,
+    include_excess_input_columns: bool = False,
+    previous_excess_totals: PreviousExcessTotals | None = None,
 ) -> ExcessBuildResult:
     item_data = item_data or ItemWorkbookData(metadata_by_part={}, prices_by_part={})
+    if include_excess_input_columns:
+        blank_columns_before_excess = 0
     demand_labels = _demand_labels(shortage_records)
     records_by_part = {record.part_no: record for record in shortage_records}
     known_parts = set(records_by_part)
@@ -143,11 +178,13 @@ def build_excess_rows(
         part_column_count,
         demand_labels,
         blank_columns_before_excess=blank_columns_before_excess,
+        include_excess_input_columns=include_excess_input_columns,
     )
     row2_headers = build_row2_headers(
         part_column_count,
         demand_labels,
         blank_columns_before_excess=blank_columns_before_excess,
+        include_excess_input_columns=include_excess_input_columns,
     )
     rows = [
         _build_output_row(
@@ -155,6 +192,8 @@ def build_excess_rows(
             part_column_count,
             demand_labels,
             blank_columns_before_excess,
+            include_excess_input_columns,
+            previous_excess_totals,
             row_number=index + 3,
             row2_headers=row2_headers,
         )
@@ -177,6 +216,7 @@ def build_row1_headers(
     demand_labels: tuple[str, ...],
     *,
     blank_columns_before_excess: int = 0,
+    include_excess_input_columns: bool = False,
 ) -> list[Any]:
     headers: list[Any] = [None] * (part_column_count + len(INFO_HEADERS))
     headers += ["Total"] + [None] * part_column_count
@@ -185,7 +225,13 @@ def build_row1_headers(
     headers += ["Total"] + [None] * part_column_count
     headers += ["Total"]
     headers += [None] * blank_columns_before_excess
-    for label in demand_labels:
+    for index, label in enumerate(demand_labels):
+        headers += [None] * len(
+            _excess_input_headers(
+                include_excess_input_columns=include_excess_input_columns,
+                is_first_group=index == 0,
+            )
+        )
         headers += [_group_header("Excess", label, demand_labels)] + [None] * (len(EXCESS_METRIC_HEADERS) - 1)
     headers += [None] * len(TRAILING_HEADERS)
     return headers
@@ -196,6 +242,7 @@ def build_row2_headers(
     demand_labels: tuple[str, ...],
     *,
     blank_columns_before_excess: int = 0,
+    include_excess_input_columns: bool = False,
 ) -> list[str]:
     headers = (
         _part_headers(part_column_count)
@@ -211,10 +258,25 @@ def build_row2_headers(
         ]
     headers += ["Openpo"] + [f"Open po{index}" for index in range(1, part_column_count + 1)]
     headers += ["Riskbuy"] + [BLANK_HEADER] * blank_columns_before_excess
-    for label in demand_labels:
+    for index, label in enumerate(demand_labels):
+        headers += _excess_input_headers(
+            include_excess_input_columns=include_excess_input_columns,
+            is_first_group=index == 0,
+        )
         headers += [_excess_header(header, label, demand_labels) for header in EXCESS_METRIC_HEADERS]
     headers += TRAILING_HEADERS
     return headers
+
+
+def _excess_input_headers(
+    *,
+    include_excess_input_columns: bool,
+    is_first_group: bool,
+) -> list[str]:
+    if not include_excess_input_columns:
+        return []
+    headers = [OTHER_DEMAND_HEADER] if is_first_group else []
+    return headers + PO_OUTSIDE_HEADERS
 
 
 def _part_headers(part_column_count: int) -> list[str]:
@@ -228,11 +290,23 @@ def _build_output_row(
     part_column_count: int,
     demand_labels: tuple[str, ...],
     blank_columns_before_excess: int,
+    include_excess_input_columns: bool,
+    previous_excess_totals: PreviousExcessTotals | None,
     row_number: int,
     row2_headers: list[str],
 ) -> list[Any]:
-    previous_total = None
-    formulas = _row_formulas(row_number, row2_headers, part_column_count, demand_labels)
+    previous_total = (
+        previous_excess_totals.total_for(row.parts)
+        if previous_excess_totals is not None
+        else None
+    )
+    formulas = _row_formulas(
+        row_number,
+        row2_headers,
+        part_column_count,
+        demand_labels,
+        include_excess_input_columns=include_excess_input_columns,
+    )
 
     values: list[Any] = (
         _pad(row.parts, part_column_count)
@@ -240,6 +314,9 @@ def _build_output_row(
             row.main_record.description,
             row.main_record.planner,
             row.main_record.buyer,
+            row.customer,
+            row.model,
+            row.model_remark,
             row.main_record.lt,
             row.main_record.moq,
             row.price,
@@ -257,6 +334,7 @@ def _build_output_row(
     values += [None] * blank_columns_before_excess
 
     for excess_formulas in formulas["excess_groups"]:
+        values += excess_formulas["input_values"]
         values += [
             excess_formulas["stock_qty"],
             excess_formulas["stock_amount"],
@@ -268,9 +346,6 @@ def _build_output_row(
     values += [
         None,
         None,
-        row.customer,
-        row.model,
-        row.model_remark,
         None,
         formulas["improve"],
         previous_total,
@@ -284,6 +359,8 @@ def _row_formulas(
     row2_headers: list[str],
     part_column_count: int,
     demand_labels: tuple[str, ...],
+    *,
+    include_excess_input_columns: bool = False,
 ) -> dict[str, Any]:
     overshortage_total = _cell_ref(row2_headers, "Overshortage", row_number)
     overshortage_first = _cell_ref(row2_headers, "Overshortage1", row_number)
@@ -299,9 +376,14 @@ def _row_formulas(
     previous_total = _cell_ref(row2_headers, "Previous Excess Total AMT", row_number)
 
     wo_total_formulas: list[str] = []
-    excess_groups: list[dict[str, str]] = []
+    excess_groups: list[dict[str, Any]] = []
     first_total_amount_ref = ""
-    for label in demand_labels:
+    other_demand = (
+        _cell_ref(row2_headers, OTHER_DEMAND_HEADER, row_number)
+        if include_excess_input_columns
+        else None
+    )
+    for index, label in enumerate(demand_labels):
         wo_total = _cell_ref(row2_headers, _demand_total_header(label, demand_labels), row_number)
         wo_first = _cell_ref(row2_headers, _demand_part_header(label, 1, demand_labels), row_number)
         wo_last = _cell_ref(
@@ -314,13 +396,27 @@ def _row_formulas(
         po_qty = _cell_ref(row2_headers, _excess_header("Excess\nPOQty", label, demand_labels), row_number)
         po_amount = _cell_ref(row2_headers, _excess_header("Excess\nPOAmount", label, demand_labels), row_number)
         total_amount = _cell_ref(row2_headers, _excess_header("Excess\nTotalAMT", label, demand_labels), row_number)
+        input_values: list[Any] = []
+        stock_qty_formula = f"=ROUND({overshortage_total}-{wo_total},0)"
+        if include_excess_input_columns and other_demand is not None:
+            stock_qty_formula = f"=ROUND({overshortage_total}-{wo_total}-{other_demand},0)"
+            po_outside_stock = _relative_cell_ref(stock_qty, row_number, -3)
+            po_outside_qty = _relative_cell_ref(stock_qty, row_number, -2)
+            if index == 0:
+                input_values.append(None)
+            input_values += [
+                None,
+                f"=IF({po_qty}>0,{po_outside_stock},IF(({po_outside_stock}+{po_qty})>0,({po_outside_stock}+{po_qty}),0))",
+                f"={po_outside_qty}*{price}",
+            ]
         if not first_total_amount_ref:
             first_total_amount_ref = total_amount
 
         wo_total_formulas.append(f"=ROUND(SUM({wo_first}:{wo_last}),0)")
         excess_groups.append(
             {
-                "stock_qty": f"=ROUND({overshortage_total}-{wo_total},0)",
+                "input_values": input_values,
+                "stock_qty": stock_qty_formula,
                 "stock_amount": f'=IF({price}="","",ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
                 "po_qty": f"=ROUND(IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total}),0)",
                 "po_amount": f'=IF({price}="","",ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
@@ -340,6 +436,24 @@ def _row_formulas(
 def _cell_ref(headers: list[str], header: str, row_number: int) -> str:
     column = headers.index(header) + 1
     return f"{get_column_letter(column)}{row_number}"
+
+
+def _relative_cell_ref(cell_ref: str, row_number: int, column_offset: int) -> str:
+    column_letters = cell_ref.removesuffix(str(row_number))
+    column = get_column_letter(column_index_from_string(column_letters) + column_offset)
+    return f"{column}{row_number}"
+
+
+def _part_key(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parts_group_key(parts: list[str]) -> tuple[str, ...] | None:
+    values = sorted({part for part in (_part_key(part) for part in parts) if part})
+    return tuple(values) if values else None
 
 
 def _shortage_aware_group(

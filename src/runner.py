@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from bom_alternates import load_bom_alternates
 from excess_builder import build_excess_rows
 from formatting import write_excess_workbook
 from incomplete_alternates import write_incomplete_alternates_workbook
+from previous_report import find_previous_excess_report, load_previous_excess_source
 from workbook_io import (
     find_bom_file,
     find_item_file,
@@ -25,7 +27,8 @@ from workbook_io import (
 
 
 CUSTOMERS = ("AVTC", "RAKEN")
-PROGRESS_STEPS = 9
+PROGRESS_STEPS = 11
+NEXT_TIME_EXCESS_REPORT_NAME = "next_time_excess_report.xlsx"
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,7 @@ class RunResult:
     shortage_file: Path
     shortage_sheet: str
     output_file: Path
+    next_time_output_file: Path
     incomplete_alternates_file: Path
     input_part_count: int
     output_row_count: int
@@ -135,9 +139,14 @@ def generate_report(
         progress.step("Find shortage sheet")
         shortage_source = find_shortage_source(input_dir, bom_file)
 
+        progress.step("Find previous Excess report")
+        previous_report_file = find_previous_excess_report(input_dir)
+
         progress.message(f"BOM: {bom_file}")
         progress.message(f"Item: {item_file}")
         progress.message(f"Shortage: {shortage_source.path} [{shortage_source.sheet_name}]")
+        if previous_report_file is not None:
+            progress.message(f"Previous Excess: {previous_report_file}")
 
         progress.step("Read BOM alternates")
         alternates = load_bom_alternates(bom_file)
@@ -148,16 +157,31 @@ def generate_report(
         progress.step("Read shortage data")
         shortage_records = load_shortage_records(shortage_source)
 
+        progress.step("Read previous Excess data")
+        if previous_report_file is None:
+            previous_excess_totals = None
+            progress.message("找不到上一版來源，不輸出improve資訊")
+        else:
+            previous_excess_totals = load_previous_excess_source(previous_report_file).totals
+
         progress.step("Build Excess rows")
-        blank_columns_before_excess = 2 if customer and customer.upper() in CUSTOMERS else 0
+        customer_code = customer.upper() if customer else None
+        include_excess_input_columns = customer_code == "AVTC"
+        blank_columns_before_excess = (
+            2
+            if customer_code in CUSTOMERS and not include_excess_input_columns
+            else 0
+        )
         result = build_excess_rows(
             shortage_records,
             alternates,
             item_data,
             blank_columns_before_excess=blank_columns_before_excess,
+            include_excess_input_columns=include_excess_input_columns,
+            previous_excess_totals=previous_excess_totals,
         )
 
-        progress.step("Write Excel file")
+        progress.step("Write Excel files")
         write_excess_workbook(
             result.rows,
             output_file,
@@ -165,6 +189,9 @@ def generate_report(
             result.row2_headers,
             result.part_column_count,
         )
+        next_time_output_file = output_file.with_name(NEXT_TIME_EXCESS_REPORT_NAME)
+        if output_file.resolve() != next_time_output_file.resolve():
+            shutil.copyfile(output_file, next_time_output_file)
 
         progress.step("Write incomplete alternates file")
         incomplete_alternates_file = output_file.with_name("incomplete_alternates.xlsx")
@@ -178,6 +205,7 @@ def generate_report(
         progress.message(f"Part columns: {result.part_column_count}")
         progress.message(f"Incomplete alternate groups: {len(alternates.incomplete_alternate_groups)}")
         progress.message(f"Output: {output_file}")
+        progress.message(f"Next-time Excess source: {next_time_output_file}")
         progress.message(f"Incomplete alternates: {incomplete_alternates_file}")
 
     return RunResult(
@@ -186,6 +214,7 @@ def generate_report(
         shortage_file=shortage_source.path,
         shortage_sheet=shortage_source.sheet_name,
         output_file=output_file,
+        next_time_output_file=next_time_output_file,
         incomplete_alternates_file=incomplete_alternates_file,
         input_part_count=result.input_part_count,
         output_row_count=result.output_row_count,

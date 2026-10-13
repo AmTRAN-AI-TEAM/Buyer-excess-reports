@@ -58,13 +58,22 @@ def _apply_layout(
     _apply_total_amount_sort(worksheet, row2_headers, last_row)
     worksheet.freeze_panes = "A3"
 
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    group_fill = PatternFill("solid", fgColor="D9EAF7")
+    header_fills = {
+        "part": PatternFill("solid", fgColor="D9EAD3"),
+        "info": PatternFill("solid", fgColor="DDEBF7"),
+        "shortage": PatternFill("solid", fgColor="FCE4D6"),
+        "demand": PatternFill("solid", fgColor="FFF2CC"),
+        "supply": PatternFill("solid", fgColor="E2F0D9"),
+        "input": PatternFill("solid", fgColor="E4DFEC"),
+        "excess": PatternFill("solid", fgColor="F8CBAD"),
+        "action": PatternFill("solid", fgColor="E7E6E6"),
+        "default": PatternFill("solid", fgColor="D9EAF7"),
+    }
     base_font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
     header_font = Font(
         name=DEFAULT_FONT_NAME,
         size=DEFAULT_FONT_SIZE,
-        color="FFFFFF",
+        color="000000",
         bold=True,
     )
     group_font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE, bold=True)
@@ -83,14 +92,14 @@ def _apply_layout(
 
     for cell in worksheet[1]:
         if cell.value not in (None, ""):
-            cell.fill = group_fill
+            cell.fill = _header_fill(row2_headers[cell.column - 1], header_fills)
             cell.font = group_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for cell in worksheet[2]:
         if cell.value in (None, ""):
             continue
-        cell.fill = header_fill
+        cell.fill = _header_fill(row2_headers[cell.column - 1], header_fills)
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
@@ -103,13 +112,17 @@ def _apply_layout(
         "Price（USD)": 12,
         "Vendor": 18,
         "reason&action": 42,
-        "Customer\n客户": 18,
+        "Customer": 18,
         "MODEL": 22,
-        "MODELRemark\n机种": 28,
-        "Category\n分类": 16,
+        "MODELRemark": 28,
+        "Category": 16,
         "Improve": 14,
         "Previous Excess Total AMT": 18,
         "是否呆": 12,
+        "others demand": 14,
+        "PO外備料": 14,
+        "PO外備料QTY": 14,
+        "PO外備料AMT": 14,
     }
 
     for column in range(1, last_column + 1):
@@ -120,6 +133,8 @@ def _apply_layout(
             continue
         base_header = _base_header(header)
         worksheet.column_dimensions[letter].width = widths_by_header.get(base_header, 12)
+
+    _hide_detail_columns(worksheet, row2_headers)
 
     for column in range(1, part_column_count + 1):
         letter = get_column_letter(column)
@@ -193,6 +208,63 @@ def _first_base_column_index(headers: list[str], base_header: str) -> int | None
     return None
 
 
+def _hide_detail_columns(worksheet: Any, row2_headers: list[str]) -> None:
+    for column, header in enumerate(row2_headers, start=1):
+        if _is_hidden_detail_header(header):
+            worksheet.column_dimensions[get_column_letter(column)].hidden = True
+
+
+def _is_hidden_detail_header(header: Any) -> bool:
+    base_header = _base_header(header)
+    return (
+        (base_header.startswith("Overshortage") and base_header != "Overshortage")
+        or base_header.startswith("WO 外demand")
+        or base_header.startswith("Open po")
+    )
+
+
+def _header_fill(header: Any, fills: dict[str, PatternFill]) -> PatternFill:
+    return fills[_header_region(header)]
+
+
+def _header_region(header: Any) -> str:
+    base_header = _base_header(header)
+    if base_header.startswith("PartNo") or base_header.startswith("替代料"):
+        return "part"
+    if base_header in {
+        "Desc",
+        "Planner",
+        "GSD",
+        "Customer",
+        "MODEL",
+        "MODELRemark",
+        "LT",
+        "MOQ",
+        "Price（USD)",
+    }:
+        return "info"
+    if base_header == "Overshortage" or base_header.startswith("Overshortage"):
+        return "shortage"
+    if base_header == "WO外demand" or base_header.startswith("WO 外demand"):
+        return "demand"
+    if base_header == "Openpo" or base_header.startswith("Open po") or base_header == "Riskbuy":
+        return "supply"
+    if base_header in {"others demand", "PO外備料", "PO外備料QTY", "PO外備料AMT"}:
+        return "input"
+    if base_header in EXCESS_BASE_HEADERS:
+        return "excess"
+    if base_header in {
+        "Vendor",
+        "reason&action",
+        "Category",
+        "Improve",
+        "Previous Excess Total AMT",
+        "是否呆",
+    }:
+        return "action"
+    return "default"
+
+
 def _base_header(header: Any) -> str:
     if header in (None, ""):
         return ""
@@ -213,6 +285,10 @@ def _is_numeric_header(header: Any) -> bool:
             "WO外demand",
             "Openpo",
             "Riskbuy",
+            "others demand",
+            "PO外備料",
+            "PO外備料QTY",
+            "PO外備料AMT",
             "Excess\nstockQTY",
             "Excess\nstockAmount",
             "Excess\nPOQty",
