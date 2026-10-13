@@ -11,6 +11,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 DEFAULT_DEMAND_LABEL = "WO外demand"
+PART_NO_HEADERS = ("Part No", "PartNo", "Part Number", "COMPONENT_ITEM")
+ITEM_PART_HEADERS = ("Item Number", "Part No", "Part No.", "COMPONENT_ITEM")
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,20 @@ def find_item_file(input_dir: Path) -> Path:
     raise ValueError(f"Found multiple Item Excel files: {names}")
 
 
+def find_price_file(input_dir: Path) -> Path:
+    candidates = [p for p in excel_files(input_dir) if "price" in p.name.lower()]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"Cannot find an Excel file with Price in its name in {input_dir}"
+        )
+
+    names = ", ".join(p.name for p in candidates)
+    raise ValueError(f"Found multiple Price Excel files: {names}")
+
+
 def find_shortage_source(input_dir: Path, bom_file: Path) -> ShortageSource:
     matches: list[ShortageSource] = []
     for workbook_path in excel_files(input_dir):
@@ -232,12 +248,11 @@ def detect_shortage_columns(worksheet: Worksheet) -> ShortageColumns:
                 return headers[normalized]
         return None
 
-    part_no = require("Part No", "PartNo", "Part Number")
+    part_no = require(*PART_NO_HEADERS)
     leading_demand_columns = tuple(
         column
         for column in range(1, part_no)
-        if _normalize_header(worksheet.cell(header_row, column).value)
-        == _normalize_header(DEFAULT_DEMAND_LABEL)
+        if _is_demand_header(worksheet.cell(header_row, column).value)
     )
     mps_columns = tuple(
         column
@@ -267,16 +282,28 @@ def detect_shortage_columns(worksheet: Worksheet) -> ShortageColumns:
     )
 
 
-def load_item_workbook_data(item_path: Path) -> ItemWorkbookData:
+def load_item_workbook_data(
+    item_path: Path,
+    *,
+    price_path: Path | None = None,
+    price_headers: tuple[str, ...] = ("Uprice",),
+) -> ItemWorkbookData:
     workbook = load_workbook(item_path, read_only=True, data_only=True)
     try:
-        item_sheet = _find_sheet(workbook.sheetnames, "Item")
-        price_sheet = _find_sheet(workbook.sheetnames, "Price")
+        item_sheet = _find_item_sheet(workbook)
         metadata = _load_item_metadata(workbook[item_sheet])
-        prices = _load_prices(workbook[price_sheet])
-        return ItemWorkbookData(metadata_by_part=metadata, prices_by_part=prices)
     finally:
         workbook.close()
+
+    price_workbook_path = price_path or item_path
+    price_workbook = load_workbook(price_workbook_path, read_only=True, data_only=True)
+    try:
+        price_sheet = _find_price_sheet(price_workbook, price_headers)
+        prices = _load_prices(price_workbook[price_sheet], price_headers)
+    finally:
+        price_workbook.close()
+
+    return ItemWorkbookData(metadata_by_part=metadata, prices_by_part=prices)
 
 
 def _find_header_row(worksheet: Worksheet) -> int:
@@ -285,7 +312,7 @@ def _find_header_row(worksheet: Worksheet) -> int:
             _normalize_header(worksheet.cell(row, column).value)
             for column in range(1, min(worksheet.max_column, 40) + 1)
         ]
-        if "partno" in values and (
+        if any(_normalize_header(name) in values for name in PART_NO_HEADERS) and (
             "description" in values or "desc" in values
         ):
             return row
@@ -320,9 +347,7 @@ def _demand_buckets(
         labels = _unique_labels(
             [
                 _demand_label(
-                    worksheet.cell(header_row - 1, column).value
-                    if header_row > 1
-                    else None,
+                    _demand_label_source(worksheet, header_row, column),
                     index,
                 )
                 for index, column in enumerate(leading_demand_columns, start=1)
@@ -348,6 +373,27 @@ def _demand_label(value: Any, index: int) -> str:
     return f"{DEFAULT_DEMAND_LABEL} {index}"
 
 
+def _demand_label_source(
+    worksheet: Worksheet,
+    header_row: int,
+    column: int,
+) -> Any:
+    if header_row > 1:
+        previous_value = _text_or_none(worksheet.cell(header_row - 1, column).value)
+        if previous_value:
+            return previous_value
+    return worksheet.cell(header_row, column).value
+
+
+def _is_demand_header(value: Any) -> bool:
+    normalized = _normalize_header(value)
+    if normalized == _normalize_header(DEFAULT_DEMAND_LABEL):
+        return True
+
+    text = str(value or "").casefold()
+    return "工单外" in text and "demand" in text
+
+
 def _unique_labels(labels: list[str]) -> list[str]:
     seen: dict[str, int] = {}
     unique: list[str] = []
@@ -359,14 +405,17 @@ def _unique_labels(labels: list[str]) -> list[str]:
 
 
 def _load_item_metadata(worksheet: Worksheet) -> dict[str, ItemMetadata]:
-    rows = worksheet.iter_rows(values_only=True)
-    try:
-        header_row = next(rows)
-    except StopIteration:
+    header_row_number = _find_table_header_row(
+        worksheet,
+        (ITEM_PART_HEADERS, ("Mps Customer",), ("Mps Model",)),
+    )
+    if header_row_number is None:
         return {}
 
+    rows = worksheet.iter_rows(min_row=header_row_number, values_only=True)
+    header_row = next(rows)
     headers = _header_map(header_row)
-    item_number = _require_header(headers, "Item Number", "Part No", "Part No.")
+    item_number = _require_header(headers, *ITEM_PART_HEADERS)
     customer = _require_header(headers, "Mps Customer")
     model = _require_header(headers, "Mps Model")
 
@@ -382,21 +431,27 @@ def _load_item_metadata(worksheet: Worksheet) -> dict[str, ItemMetadata]:
     return metadata
 
 
-def _load_prices(worksheet: Worksheet) -> dict[str, float]:
-    rows = worksheet.iter_rows(values_only=True)
-    try:
-        header_row = next(rows)
-    except StopIteration:
+def _load_prices(
+    worksheet: Worksheet,
+    price_headers: tuple[str, ...],
+) -> dict[str, float]:
+    header_row_number = _find_table_header_row(
+        worksheet,
+        (PART_NO_HEADERS, price_headers),
+    )
+    if header_row_number is None:
         return {}
 
+    rows = worksheet.iter_rows(min_row=header_row_number, values_only=True)
+    header_row = next(rows)
     headers = _header_map(header_row)
-    part_no_column = _require_header(headers, "Part No.", "Part No", "Part Number")
-    uprice_column = _require_header(headers, "Uprice")
+    part_no_column = _require_header(headers, *PART_NO_HEADERS)
+    uprice_column = _require_header(headers, *price_headers)
     allocation_column = _optional_header(headers, "Allocation")
     start_date_column = _optional_header(headers, "Start Date")
 
     candidates: dict[str, PriceCandidate] = {}
-    for row_number, row in enumerate(rows, start=2):
+    for row_number, row in enumerate(rows, start=header_row_number + 1):
         part_no = _text_or_none(_cell_by_index(row, part_no_column))
         price = _number_or_none(_cell_by_index(row, uprice_column))
         if not part_no or price is None:
@@ -413,6 +468,58 @@ def _load_prices(worksheet: Worksheet) -> dict[str, float]:
             candidates[part_no] = candidate
 
     return {part_no: candidate.price for part_no, candidate in candidates.items()}
+
+
+def _find_item_sheet(workbook: Any) -> str:
+    exact_sheet = _find_sheet_or_none(workbook.sheetnames, "Item")
+    if exact_sheet is not None:
+        return exact_sheet
+    return _find_sheet_with_headers(
+        workbook,
+        (ITEM_PART_HEADERS, ("Mps Customer",), ("Mps Model",)),
+        "Item metadata",
+    )
+
+
+def _find_price_sheet(workbook: Any, price_headers: tuple[str, ...]) -> str:
+    exact_sheet = _find_sheet_or_none(workbook.sheetnames, "Price")
+    if exact_sheet is not None:
+        return exact_sheet
+    return _find_sheet_with_headers(
+        workbook,
+        (PART_NO_HEADERS, price_headers),
+        "Price",
+    )
+
+
+def _find_sheet_with_headers(
+    workbook: Any,
+    required_header_groups: tuple[tuple[str, ...], ...],
+    description: str,
+) -> str:
+    for sheet_name in workbook.sheetnames:
+        if _find_table_header_row(workbook[sheet_name], required_header_groups) is not None:
+            return sheet_name
+    raise ValueError(f"Cannot find required {description} sheet")
+
+
+def _find_table_header_row(
+    worksheet: Worksheet,
+    required_header_groups: tuple[tuple[str, ...], ...],
+    *,
+    max_rows: int = 30,
+) -> int | None:
+    for row_number, row in enumerate(
+        worksheet.iter_rows(max_row=min(worksheet.max_row, max_rows), values_only=True),
+        start=1,
+    ):
+        headers = _header_map(row)
+        if all(
+            any(_normalize_header(header) in headers for header in group)
+            for group in required_header_groups
+        ):
+            return row_number
+    return None
 
 
 def _price_rank(candidate: PriceCandidate) -> tuple[float, datetime, int]:
@@ -493,10 +600,17 @@ def _date_value(value: Any) -> datetime:
 
 
 def _find_sheet(sheet_names: list[str], expected_name: str) -> str:
+    sheet_name = _find_sheet_or_none(sheet_names, expected_name)
+    if sheet_name is not None:
+        return sheet_name
+    raise ValueError(f"Cannot find required sheet {expected_name}")
+
+
+def _find_sheet_or_none(sheet_names: list[str], expected_name: str) -> str | None:
     for sheet_name in sheet_names:
         if sheet_name.lower() == expected_name.lower():
             return sheet_name
-    raise ValueError(f"Cannot find required sheet {expected_name}")
+    return None
 
 
 def _metadata_value(

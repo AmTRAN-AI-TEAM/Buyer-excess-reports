@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
     tqdm = None
 
 from bom_alternates import load_bom_alternates
+from customer_profiles import profile_for
 from excess_builder import build_excess_rows
 from formatting import write_excess_workbook
 from incomplete_alternates import write_incomplete_alternates_workbook
@@ -20,6 +21,7 @@ from previous_report import find_previous_excess_report, load_previous_excess_so
 from workbook_io import (
     find_bom_file,
     find_item_file,
+    find_price_file,
     find_shortage_source,
     load_item_workbook_data,
     load_shortage_records,
@@ -35,6 +37,7 @@ NEXT_TIME_EXCESS_REPORT_NAME = "next_time_excess_report.xlsx"
 class RunResult:
     bom_file: Path
     item_file: Path
+    price_file: Path | None
     shortage_file: Path
     shortage_sheet: str
     output_file: Path
@@ -128,6 +131,7 @@ def generate_report(
 ) -> RunResult:
     input_dir = input_dir.resolve()
     output_file = output_file.resolve()
+    profile = profile_for(customer)
 
     with Progress(PROGRESS_STEPS, enabled=show_progress) as progress:
         progress.step("Find BOM")
@@ -135,6 +139,7 @@ def generate_report(
 
         progress.step("Find Item workbook")
         item_file = find_item_file(input_dir)
+        price_file = find_price_file(input_dir) if profile and profile.separate_price_file else None
 
         progress.step("Find shortage sheet")
         shortage_source = find_shortage_source(input_dir, bom_file)
@@ -144,6 +149,8 @@ def generate_report(
 
         progress.message(f"BOM: {bom_file}")
         progress.message(f"Item: {item_file}")
+        if price_file is not None:
+            progress.message(f"Price: {price_file}")
         progress.message(f"Shortage: {shortage_source.path} [{shortage_source.sheet_name}]")
         if previous_report_file is not None:
             progress.message(f"Previous Excess: {previous_report_file}")
@@ -152,7 +159,11 @@ def generate_report(
         alternates = load_bom_alternates(bom_file)
 
         progress.step("Read Item/Price data")
-        item_data = load_item_workbook_data(item_file)
+        item_data = load_item_workbook_data(
+            item_file,
+            price_path=price_file,
+            price_headers=profile.price_headers if profile else ("Uprice",),
+        )
 
         progress.step("Read shortage data")
         shortage_records = load_shortage_records(shortage_source)
@@ -166,17 +177,11 @@ def generate_report(
 
         progress.step("Build Excess rows")
         customer_code = customer.upper() if customer else None
-        include_excess_input_columns = customer_code == "AVTC"
-        blank_columns_before_excess = (
-            2
-            if customer_code in CUSTOMERS and not include_excess_input_columns
-            else 0
-        )
+        include_excess_input_columns = customer_code in CUSTOMERS
         result = build_excess_rows(
             shortage_records,
             alternates,
             item_data,
-            blank_columns_before_excess=blank_columns_before_excess,
             include_excess_input_columns=include_excess_input_columns,
             previous_excess_totals=previous_excess_totals,
         )
@@ -211,6 +216,7 @@ def generate_report(
     return RunResult(
         bom_file=bom_file,
         item_file=item_file,
+        price_file=price_file,
         shortage_file=shortage_source.path,
         shortage_sheet=shortage_source.sheet_name,
         output_file=output_file,

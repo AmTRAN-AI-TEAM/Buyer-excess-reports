@@ -39,6 +39,18 @@ class IncompleteAlternateGroup:
     details: tuple[IncompleteAlternateDetail, ...]
 
 
+@dataclass(frozen=True)
+class BomColumns:
+    header_row: int
+    top_assembly: int | None
+    model_remark: int | None
+    bill_level: int | None
+    assembly_item: int | None
+    item_seq: int | None
+    component: int | None
+    component_description: int | None
+
+
 @dataclass
 class BomAlternates:
     segments_by_part: dict[str, tuple[BomAlternateSegment, ...]]
@@ -103,8 +115,9 @@ class BomAlternates:
 
 def load_bom_alternates(bom_path: Path) -> BomAlternates:
     workbook = load_workbook(bom_path, read_only=True, data_only=True)
-    bom_sheet = _find_sheet(workbook.sheetnames, "BOM")
+    bom_sheet = _find_bom_sheet(workbook)
     bom_ws = workbook[bom_sheet]
+    columns = _detect_bom_columns(bom_ws)
 
     finished_goods = _load_finished_goods(workbook)
     first_seen: dict[str, int] = {}
@@ -123,14 +136,17 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     current_model: str | None = None
     order = 0
 
-    for row_number, row in enumerate(bom_ws.iter_rows(min_row=2, values_only=True), start=2):
-        top_assembly = row[0] if len(row) > 0 else None
-        model_remark = row[1] if len(row) > 1 else None
-        bill_level = row[2] if len(row) > 2 else None
-        assembly_item = row[3] if len(row) > 3 else None
-        item_seq = row[6] if len(row) > 6 else None
-        component = row[7] if len(row) > 7 else None
-        component_description = row[8] if len(row) > 8 else None
+    for row_number, row in enumerate(
+        bom_ws.iter_rows(min_row=columns.header_row + 1, values_only=True),
+        start=columns.header_row + 1,
+    ):
+        top_assembly = _cell_by_index(row, columns.top_assembly)
+        model_remark = _cell_by_index(row, columns.model_remark)
+        bill_level = _cell_by_index(row, columns.bill_level)
+        assembly_item = _cell_by_index(row, columns.assembly_item)
+        item_seq = _cell_by_index(row, columns.item_seq)
+        component = _cell_by_index(row, columns.component)
+        component_description = _cell_by_index(row, columns.component_description)
 
         if component in (None, ""):
             continue
@@ -213,11 +229,107 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     )
 
 
-def _find_sheet(sheet_names: list[str], expected_name: str) -> str:
-    for sheet_name in sheet_names:
-        if sheet_name.lower() == expected_name.lower():
+def _find_bom_sheet(workbook: Any) -> str:
+    for sheet_name in workbook.sheetnames:
+        if sheet_name.lower() == "bom":
             return sheet_name
-    raise ValueError(f"Cannot find required sheet {expected_name}")
+
+    keyword_matches = [
+        sheet_name for sheet_name in workbook.sheetnames if "bom" in sheet_name.casefold()
+    ]
+    if len(keyword_matches) == 1:
+        return keyword_matches[0]
+
+    candidate_names = keyword_matches or workbook.sheetnames
+    header_matches = [
+        sheet_name
+        for sheet_name in candidate_names
+        if _find_bom_header_row(workbook[sheet_name]) is not None
+    ]
+    if len(header_matches) == 1:
+        return header_matches[0]
+
+    if not header_matches:
+        raise ValueError("Cannot find required sheet BOM")
+
+    names = ", ".join(header_matches)
+    raise ValueError(f"Found multiple BOM-like sheets: {names}")
+
+
+def _detect_bom_columns(worksheet: Any) -> BomColumns:
+    header_row = _find_bom_header_row(worksheet)
+    if header_row is None:
+        return BomColumns(
+            header_row=1,
+            top_assembly=0,
+            model_remark=1,
+            bill_level=2,
+            assembly_item=3,
+            item_seq=6,
+            component=7,
+            component_description=8,
+        )
+
+    headers = _header_map(
+        [
+            worksheet.cell(header_row, column).value
+            for column in range(1, worksheet.max_column + 1)
+        ]
+    )
+    return BomColumns(
+        header_row=header_row,
+        top_assembly=_optional_header(
+            headers,
+            "_x000C_TOP_ASSEMBLY_ITEM",
+            "TOP_ASSEMBLY_ITEM",
+            "Top Assembly Item",
+        ),
+        model_remark=_optional_header(headers, "Model", "MODELRemark", "机种"),
+        bill_level=_optional_header(headers, "BILL_LEVEL", "BILL_LEVE", "Bill Level"),
+        assembly_item=_optional_header(
+            headers,
+            "ASSEMBLY_ITEM",
+            "L ASSEMBLY_ITEM",
+            "Assembly Item",
+        ),
+        item_seq=_optional_header(headers, "ITEM_SEQ", "Item Seq"),
+        component=_optional_header(
+            headers,
+            "COMPONENT_ITEM",
+            "Component Item",
+            "Component",
+            "Part No",
+            "Part Number",
+        ),
+        component_description=_optional_header(
+            headers,
+            "COMPONENT_DESCRIPTION",
+            "Component Description",
+            "Description",
+            "Desc",
+        ),
+    )
+
+
+def _find_bom_header_row(worksheet: Any) -> int | None:
+    for row_number, row in enumerate(
+        worksheet.iter_rows(max_row=min(worksheet.max_row, 30), values_only=True),
+        start=1,
+    ):
+        headers = _header_map(row)
+        if _optional_header(headers, "ITEM_SEQ", "Item Seq") is not None and (
+            _optional_header(
+                headers,
+                "COMPONENT_ITEM",
+                "Component Item",
+                "Component",
+                "Part No",
+                "Part Number",
+            )
+            is not None
+        ):
+            return row_number
+    return None
 
 
 def _load_finished_goods(workbook: Any) -> dict[str, FinishedGoodMetadata]:
@@ -412,6 +524,34 @@ def _append_unique(values: list[str], value: Any) -> None:
     text = _text_or_none(value)
     if text and text not in values:
         values.append(text)
+
+
+def _cell_by_index(row: tuple[Any, ...], zero_based_column: int | None) -> Any:
+    if zero_based_column is None or zero_based_column >= len(row):
+        return None
+    return row[zero_based_column]
+
+
+def _header_map(header_row: tuple[Any, ...] | list[Any]) -> dict[str, int]:
+    return {
+        _normalize_header(value): index
+        for index, value in enumerate(header_row)
+        if value not in (None, "")
+    }
+
+
+def _optional_header(headers: dict[str, int], *names: str) -> int | None:
+    for name in names:
+        normalized = _normalize_header(name)
+        if normalized in headers:
+            return headers[normalized]
+    return None
+
+
+def _normalize_header(value: Any) -> str:
+    if value is None:
+        return ""
+    return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
 
 
 def _text_or_none(value: Any) -> str | None:

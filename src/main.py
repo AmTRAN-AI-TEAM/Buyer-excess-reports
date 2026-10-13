@@ -7,7 +7,7 @@
 #   python3 src/main.py --customer AVTC
 #
 # Input folders:
-#   input/RAKEN/BOM.xlsx + one Excel file with a shortage sheet
+#   input/RAKEN/BOM.xlsx + Item.xlsx + Price.xlsx + one Excel file with a shortage sheet
 #   input/AVTC/BOM.xlsx  + one Excel file with a shortage sheet
 #
 # Output files:

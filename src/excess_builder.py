@@ -44,7 +44,6 @@ TRAILING_HEADERS = [
     "Previous Excess Total AMT",
     "是否呆",
 ]
-BLANK_HEADER = ""
 DEFAULT_DEMAND_LABELS = ("WO外demand",)
 
 
@@ -95,13 +94,10 @@ def build_excess_rows(
     alternates: BomAlternates,
     item_data: ItemWorkbookData | None = None,
     *,
-    blank_columns_before_excess: int = 0,
     include_excess_input_columns: bool = False,
     previous_excess_totals: PreviousExcessTotals | None = None,
 ) -> ExcessBuildResult:
     item_data = item_data or ItemWorkbookData(metadata_by_part={}, prices_by_part={})
-    if include_excess_input_columns:
-        blank_columns_before_excess = 0
     demand_labels = _demand_labels(shortage_records)
     records_by_part = {record.part_no: record for record in shortage_records}
     known_parts = set(records_by_part)
@@ -177,13 +173,11 @@ def build_excess_rows(
     row1_headers = build_row1_headers(
         part_column_count,
         demand_labels,
-        blank_columns_before_excess=blank_columns_before_excess,
         include_excess_input_columns=include_excess_input_columns,
     )
     row2_headers = build_row2_headers(
         part_column_count,
         demand_labels,
-        blank_columns_before_excess=blank_columns_before_excess,
         include_excess_input_columns=include_excess_input_columns,
     )
     rows = [
@@ -191,7 +185,6 @@ def build_excess_rows(
             row,
             part_column_count,
             demand_labels,
-            blank_columns_before_excess,
             include_excess_input_columns,
             previous_excess_totals,
             row_number=index + 3,
@@ -215,7 +208,6 @@ def build_row1_headers(
     part_column_count: int,
     demand_labels: tuple[str, ...],
     *,
-    blank_columns_before_excess: int = 0,
     include_excess_input_columns: bool = False,
 ) -> list[Any]:
     headers: list[Any] = [None] * (part_column_count + len(INFO_HEADERS))
@@ -224,7 +216,6 @@ def build_row1_headers(
         headers += [_group_header("Total", label, demand_labels)] + [None] * part_column_count
     headers += ["Total"] + [None] * part_column_count
     headers += ["Total"]
-    headers += [None] * blank_columns_before_excess
     for index, label in enumerate(demand_labels):
         headers += [None] * len(
             _excess_input_headers(
@@ -241,7 +232,6 @@ def build_row2_headers(
     part_column_count: int,
     demand_labels: tuple[str, ...],
     *,
-    blank_columns_before_excess: int = 0,
     include_excess_input_columns: bool = False,
 ) -> list[str]:
     headers = (
@@ -257,7 +247,7 @@ def build_row2_headers(
             for index in range(1, part_column_count + 1)
         ]
     headers += ["Openpo"] + [f"Open po{index}" for index in range(1, part_column_count + 1)]
-    headers += ["Riskbuy"] + [BLANK_HEADER] * blank_columns_before_excess
+    headers += ["Riskbuy"]
     for index, label in enumerate(demand_labels):
         headers += _excess_input_headers(
             include_excess_input_columns=include_excess_input_columns,
@@ -289,7 +279,6 @@ def _build_output_row(
     row: _PreparedExcessRow,
     part_column_count: int,
     demand_labels: tuple[str, ...],
-    blank_columns_before_excess: int,
     include_excess_input_columns: bool,
     previous_excess_totals: PreviousExcessTotals | None,
     row_number: int,
@@ -331,7 +320,6 @@ def _build_output_row(
     values += [formulas["open_po_total"]]
     values += _pad(row.open_po_values, part_column_count, fill=0)
     values += [None]
-    values += [None] * blank_columns_before_excess
 
     for excess_formulas in formulas["excess_groups"]:
         values += excess_formulas["input_values"]
