@@ -148,6 +148,7 @@ def _apply_layout(
                 header_fills,
                 column=cell.column,
                 excess_column_fills=excess_column_fills,
+                customer=customer,
             )
             cell.font = group_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -160,6 +161,7 @@ def _apply_layout(
             header_fills,
             column=cell.column,
             excess_column_fills=excess_column_fills,
+            customer=customer,
         )
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -325,11 +327,14 @@ def _header_fill(
     *,
     column: int | None = None,
     excess_column_fills: dict[int, PatternFill] | None = None,
+    customer: str | None = None,
 ) -> PatternFill:
     if column is not None and excess_column_fills:
         excess_fill = excess_column_fills.get(column)
         if excess_fill is not None and _base_header(header) in EXCESS_HEADER_SET:
             return excess_fill
+    if customer and customer.upper() == "AVTC" and _header_region(header) == "part":
+        return fills["info"]
     return fills[_header_region(header)]
 
 
