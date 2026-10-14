@@ -45,7 +45,11 @@ def find_previous_excess_report(input_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
-def load_previous_excess_source(path: Path) -> PreviousExcessSource:
+def load_previous_excess_source(
+    path: Path,
+    *,
+    customer: str | None = None,
+) -> PreviousExcessSource:
     workbook = load_workbook(path, data_only=False, read_only=True)
     try:
         worksheet = workbook["Excess"] if "Excess" in workbook.sheetnames else workbook.active
@@ -61,7 +65,11 @@ def load_previous_excess_source(path: Path) -> PreviousExcessSource:
             parts = _row_parts(row, columns.part_columns)
             if not parts:
                 continue
-            total = _previous_total_amount(row, columns)
+            total = _previous_total_amount(
+                row,
+                columns,
+                include_excess_input_columns=_include_excess_input_columns(customer, columns),
+            )
             totals_by_part.setdefault(parts[0], total)
             totals_by_group.setdefault(tuple(sorted(set(parts))), total)
 
@@ -108,6 +116,8 @@ def _detect_previous_columns(headers: tuple[Any, ...]) -> _PreviousColumns:
 def _previous_total_amount(
     row: tuple[Any, ...],
     columns: _PreviousColumns,
+    *,
+    include_excess_input_columns: bool,
 ) -> float:
     price = _number_or_none(_cell(row, columns.price))
     overshortage_total = _sum_columns(row, columns.overshortage_details)
@@ -115,7 +125,7 @@ def _previous_total_amount(
     open_po_total = _sum_columns(row, columns.open_po_details)
     other_demand = (
         _number(_cell(row, columns.other_demand))
-        if columns.other_demand is not None
+        if include_excess_input_columns and columns.other_demand is not None
         else 0.0
     )
 
@@ -128,7 +138,7 @@ def _previous_total_amount(
     po_amount = _round_integer(po_qty * price if po_qty > 0 else 0)
     po_outside_stock = (
         _number(_cell(row, columns.po_outside_stock))
-        if columns.po_outside_stock is not None
+        if include_excess_input_columns and columns.po_outside_stock is not None
         else 0.0
     )
     po_outside_qty = (
@@ -138,6 +148,15 @@ def _previous_total_amount(
     )
     po_outside_amount = _round_integer(po_outside_qty * price)
     return float(_round_integer(stock_amount + po_amount + po_outside_amount))
+
+
+def _include_excess_input_columns(
+    customer: str | None,
+    columns: _PreviousColumns,
+) -> bool:
+    if customer:
+        return customer.upper() == "RAKEN"
+    return columns.other_demand is not None or columns.po_outside_stock is not None
 
 
 def _row_parts(

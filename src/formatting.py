@@ -20,6 +20,21 @@ EXCESS_BASE_HEADERS = [
     "Excess\nstockAmount",
     "Excess\nTotalAMT",
 ]
+AVTC_EXCESS_BASE_HEADERS = [
+    "Excess\nstockQTY",
+    "Excess\nstockAmount",
+    "Excess\nPOQty",
+    "Excess\nPOAmount",
+    "Excess\nTotalAMT",
+]
+EXCESS_HEADER_SET = set(EXCESS_BASE_HEADERS) | set(AVTC_EXCESS_BASE_HEADERS)
+AVTC_EXCESS_GROUP_COLORS = (
+    "F8CBAD",
+    "D9EAD3",
+    "DDEBF7",
+    "FFF2CC",
+    "E4DFEC",
+)
 
 
 def write_excess_workbook(
@@ -28,7 +43,10 @@ def write_excess_workbook(
     row1_headers: list[Any],
     row2_headers: list[str],
     part_column_count: int,
+    *,
+    customer: str | None = None,
 ) -> None:
+    _validate_workbook_shape(rows, row1_headers, row2_headers)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     workbook = Workbook()
@@ -40,8 +58,33 @@ def write_excess_workbook(
     for row in rows:
         worksheet.append(row)
 
-    _apply_layout(worksheet, len(rows) + 2, row2_headers, part_column_count)
+    _apply_layout(
+        worksheet,
+        len(rows) + 2,
+        row2_headers,
+        part_column_count,
+        customer=customer,
+    )
     workbook.save(output_file)
+
+
+def _validate_workbook_shape(
+    rows: list[list[Any]],
+    row1_headers: list[Any],
+    row2_headers: list[str],
+) -> None:
+    expected = len(row2_headers)
+    if len(row1_headers) != expected:
+        raise ValueError(
+            f"Header row length mismatch: row 1 has {len(row1_headers)} columns, "
+            f"row 2 has {expected} columns"
+        )
+    for row_number, row in enumerate(rows, start=3):
+        if len(row) != expected:
+            raise ValueError(
+                f"Generated row length mismatch at Excel row {row_number}: "
+                f"row has {len(row)} columns, header has {expected} columns"
+            )
 
 
 def _apply_layout(
@@ -49,11 +92,14 @@ def _apply_layout(
     last_row: int,
     row2_headers: list[str],
     part_column_count: int,
+    *,
+    customer: str | None = None,
 ) -> None:
     last_column = len(row2_headers)
     last_column_letter = get_column_letter(last_column)
+    excess_base_headers = _excess_base_headers(customer)
 
-    _merge_excess_groups(worksheet, row2_headers)
+    _merge_excess_groups(worksheet, row2_headers, excess_base_headers)
     worksheet.auto_filter.ref = f"A2:{last_column_letter}{max(last_row, 2)}"
     _apply_total_amount_sort(worksheet, row2_headers, last_row)
     worksheet.freeze_panes = "A3"
@@ -69,6 +115,11 @@ def _apply_layout(
         "action": PatternFill("solid", fgColor="E7E6E6"),
         "default": PatternFill("solid", fgColor="D9EAF7"),
     }
+    excess_column_fills = _excess_column_fills(
+        row2_headers,
+        excess_base_headers,
+        customer=customer,
+    )
     base_font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
     header_font = Font(
         name=DEFAULT_FONT_NAME,
@@ -92,14 +143,24 @@ def _apply_layout(
 
     for cell in worksheet[1]:
         if cell.value not in (None, ""):
-            cell.fill = _header_fill(row2_headers[cell.column - 1], header_fills)
+            cell.fill = _header_fill(
+                row2_headers[cell.column - 1],
+                header_fills,
+                column=cell.column,
+                excess_column_fills=excess_column_fills,
+            )
             cell.font = group_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for cell in worksheet[2]:
         if cell.value in (None, ""):
             continue
-        cell.fill = _header_fill(row2_headers[cell.column - 1], header_fills)
+        cell.fill = _header_fill(
+            row2_headers[cell.column - 1],
+            header_fills,
+            column=cell.column,
+            excess_column_fills=excess_column_fills,
+        )
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
@@ -161,8 +222,12 @@ def _apply_layout(
             worksheet.cell(row, column).number_format = "@"
 
 
-def _merge_excess_groups(worksheet: Any, row2_headers: list[str]) -> None:
-    for start_column, end_column in _excess_group_ranges(row2_headers):
+def _merge_excess_groups(
+    worksheet: Any,
+    row2_headers: list[str],
+    excess_base_headers: list[str],
+) -> None:
+    for start_column, end_column in _excess_group_ranges(row2_headers, excess_base_headers):
         worksheet.merge_cells(
             start_row=1,
             start_column=start_column,
@@ -171,16 +236,47 @@ def _merge_excess_groups(worksheet: Any, row2_headers: list[str]) -> None:
         )
 
 
-def _excess_group_ranges(row2_headers: list[str]) -> list[tuple[int, int]]:
+def _excess_group_ranges(
+    row2_headers: list[str],
+    excess_base_headers: list[str],
+) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
-    width = len(EXCESS_BASE_HEADERS)
+    width = len(excess_base_headers)
     for index in range(0, len(row2_headers) - width + 1):
         if [
             _base_header(row2_headers[index + offset])
             for offset in range(width)
-        ] == EXCESS_BASE_HEADERS:
+        ] == excess_base_headers:
             ranges.append((index + 1, index + width))
     return ranges
+
+
+def _excess_base_headers(customer: str | None) -> list[str]:
+    if customer and customer.upper() == "AVTC":
+        return AVTC_EXCESS_BASE_HEADERS
+    return EXCESS_BASE_HEADERS
+
+
+def _excess_column_fills(
+    row2_headers: list[str],
+    excess_base_headers: list[str],
+    *,
+    customer: str | None = None,
+) -> dict[int, PatternFill]:
+    if not customer or customer.upper() != "AVTC":
+        return {}
+
+    fills: dict[int, PatternFill] = {}
+    for index, (start_column, end_column) in enumerate(
+        _excess_group_ranges(row2_headers, excess_base_headers)
+    ):
+        fill = PatternFill(
+            "solid",
+            fgColor=AVTC_EXCESS_GROUP_COLORS[index % len(AVTC_EXCESS_GROUP_COLORS)],
+        )
+        for column in range(start_column, end_column + 1):
+            fills[column] = fill
+    return fills
 
 
 def _apply_total_amount_sort(
@@ -223,7 +319,17 @@ def _is_hidden_detail_header(header: Any) -> bool:
     )
 
 
-def _header_fill(header: Any, fills: dict[str, PatternFill]) -> PatternFill:
+def _header_fill(
+    header: Any,
+    fills: dict[str, PatternFill],
+    *,
+    column: int | None = None,
+    excess_column_fills: dict[int, PatternFill] | None = None,
+) -> PatternFill:
+    if column is not None and excess_column_fills:
+        excess_fill = excess_column_fills.get(column)
+        if excess_fill is not None and _base_header(header) in EXCESS_HEADER_SET:
+            return excess_fill
     return fills[_header_region(header)]
 
 
@@ -251,7 +357,7 @@ def _header_region(header: Any) -> str:
         return "supply"
     if base_header in {"others demand", "PO外備料", "PO外備料QTY", "PO外備料AMT"}:
         return "input"
-    if base_header in EXCESS_BASE_HEADERS:
+    if base_header in EXCESS_HEADER_SET:
         return "excess"
     if base_header in {
         "Vendor",

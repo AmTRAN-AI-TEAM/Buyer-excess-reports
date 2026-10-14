@@ -20,11 +20,26 @@ INFO_HEADERS = [
     "MOQ",
     "Price（USD)",
 ]
+AVTC_INFO_HEADERS = [
+    "Desc",
+    "Planner",
+    "GSD",
+    "LT",
+    "MOQ",
+    "Price（USD)",
+]
 EXCESS_METRIC_HEADERS = [
     "Excess\nPOQty",
     "Excess\nPOAmount",
     "Excess\nstockQTY",
     "Excess\nstockAmount",
+    "Excess\nTotalAMT",
+]
+AVTC_EXCESS_METRIC_HEADERS = [
+    "Excess\nstockQTY",
+    "Excess\nstockAmount",
+    "Excess\nPOQty",
+    "Excess\nPOAmount",
     "Excess\nTotalAMT",
 ]
 OTHER_DEMAND_HEADER = "others demand"
@@ -44,7 +59,27 @@ TRAILING_HEADERS = [
     "Previous Excess Total AMT",
     "是否呆",
 ]
+AVTC_TRAILING_HEADERS = [
+    "Vendor",
+    "reason&action",
+    "Customer\n客户",
+    "MODEL",
+    "MODELRemark\n机种",
+    "Category\n分类",
+    "Improve",
+    "Previous Excess Total AMT",
+    "是否呆",
+]
 DEFAULT_DEMAND_LABELS = ("WO外demand",)
+
+
+@dataclass(frozen=True)
+class ExcessLayout:
+    info_headers: tuple[str, ...]
+    trailing_headers: tuple[str, ...]
+    excess_metric_headers: tuple[str, ...]
+    include_excess_input_columns: bool = False
+    blank_columns_before_excess: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,8 +131,10 @@ def build_excess_rows(
     *,
     include_excess_input_columns: bool = False,
     previous_excess_totals: PreviousExcessTotals | None = None,
+    customer: str | None = None,
 ) -> ExcessBuildResult:
     item_data = item_data or ItemWorkbookData(metadata_by_part={}, prices_by_part={})
+    layout = _layout_for_customer(customer, include_excess_input_columns)
     demand_labels = _demand_labels(shortage_records)
     records_by_part = {record.part_no: record for record in shortage_records}
     known_parts = set(records_by_part)
@@ -143,7 +180,7 @@ def build_excess_rows(
             continue
 
         main_record = _first_record(displayed_parts, records_by_part)
-        customer = item_data.customer_summary(displayed_parts)
+        customer_summary = item_data.customer_summary(displayed_parts)
         model = alternates.primary_model_for(
             record.part_no,
             known_parts=known_parts,
@@ -162,7 +199,7 @@ def build_excess_rows(
                 overshortage_total=overshortage_total,
                 wo_totals=wo_totals,
                 open_po_total=open_po_total,
-                customer=customer,
+                customer=customer_summary,
                 model=model,
                 model_remark=model_remark,
             )
@@ -173,19 +210,21 @@ def build_excess_rows(
     row1_headers = build_row1_headers(
         part_column_count,
         demand_labels,
-        include_excess_input_columns=include_excess_input_columns,
+        customer=customer,
+        include_excess_input_columns=layout.include_excess_input_columns,
     )
     row2_headers = build_row2_headers(
         part_column_count,
         demand_labels,
-        include_excess_input_columns=include_excess_input_columns,
+        customer=customer,
+        include_excess_input_columns=layout.include_excess_input_columns,
     )
     rows = [
         _build_output_row(
             row,
             part_column_count,
             demand_labels,
-            include_excess_input_columns,
+            layout,
             previous_excess_totals,
             row_number=index + 3,
             row2_headers=row2_headers,
@@ -209,22 +248,25 @@ def build_row1_headers(
     demand_labels: tuple[str, ...],
     *,
     include_excess_input_columns: bool = False,
+    customer: str | None = None,
 ) -> list[Any]:
-    headers: list[Any] = [None] * (part_column_count + len(INFO_HEADERS))
+    layout = _layout_for_customer(customer, include_excess_input_columns)
+    headers: list[Any] = [None] * (part_column_count + len(layout.info_headers))
     headers += ["Total"] + [None] * part_column_count
     for label in demand_labels:
         headers += [_group_header("Total", label, demand_labels)] + [None] * part_column_count
     headers += ["Total"] + [None] * part_column_count
     headers += ["Total"]
+    headers += [None] * layout.blank_columns_before_excess
     for index, label in enumerate(demand_labels):
         headers += [None] * len(
             _excess_input_headers(
-                include_excess_input_columns=include_excess_input_columns,
+                include_excess_input_columns=layout.include_excess_input_columns,
                 is_first_group=index == 0,
             )
         )
-        headers += [_group_header("Excess", label, demand_labels)] + [None] * (len(EXCESS_METRIC_HEADERS) - 1)
-    headers += [None] * len(TRAILING_HEADERS)
+        headers += [_group_header("Excess", label, demand_labels)] + [None] * (len(layout.excess_metric_headers) - 1)
+    headers += [None] * len(layout.trailing_headers)
     return headers
 
 
@@ -233,10 +275,12 @@ def build_row2_headers(
     demand_labels: tuple[str, ...],
     *,
     include_excess_input_columns: bool = False,
+    customer: str | None = None,
 ) -> list[str]:
+    layout = _layout_for_customer(customer, include_excess_input_columns)
     headers = (
         _part_headers(part_column_count)
-        + INFO_HEADERS
+        + list(layout.info_headers)
         + ["Overshortage"]
         + [f"Overshortage{index}" for index in range(1, part_column_count + 1)]
     )
@@ -248,13 +292,14 @@ def build_row2_headers(
         ]
     headers += ["Openpo"] + [f"Open po{index}" for index in range(1, part_column_count + 1)]
     headers += ["Riskbuy"]
+    headers += [""] * layout.blank_columns_before_excess
     for index, label in enumerate(demand_labels):
         headers += _excess_input_headers(
-            include_excess_input_columns=include_excess_input_columns,
+            include_excess_input_columns=layout.include_excess_input_columns,
             is_first_group=index == 0,
         )
-        headers += [_excess_header(header, label, demand_labels) for header in EXCESS_METRIC_HEADERS]
-    headers += TRAILING_HEADERS
+        headers += [_excess_header(header, label, demand_labels) for header in layout.excess_metric_headers]
+    headers += list(layout.trailing_headers)
     return headers
 
 
@@ -269,17 +314,84 @@ def _excess_input_headers(
     return headers + PO_OUTSIDE_HEADERS
 
 
+def _layout_for_customer(
+    customer: str | None,
+    include_excess_input_columns: bool,
+) -> ExcessLayout:
+    customer_code = customer.upper() if customer else None
+    if customer_code == "AVTC":
+        return ExcessLayout(
+            info_headers=tuple(AVTC_INFO_HEADERS),
+            trailing_headers=tuple(AVTC_TRAILING_HEADERS),
+            excess_metric_headers=tuple(AVTC_EXCESS_METRIC_HEADERS),
+            include_excess_input_columns=False,
+            blank_columns_before_excess=2,
+        )
+    return ExcessLayout(
+        info_headers=tuple(INFO_HEADERS),
+        trailing_headers=tuple(TRAILING_HEADERS),
+        excess_metric_headers=tuple(EXCESS_METRIC_HEADERS),
+        include_excess_input_columns=include_excess_input_columns
+        or customer_code == "RAKEN",
+    )
+
+
 def _part_headers(part_column_count: int) -> list[str]:
     return ["PartNo1"] + [
         f"替代料{index}" for index in range(2, part_column_count + 1)
     ]
 
 
+def _info_values(row: _PreparedExcessRow, layout: ExcessLayout) -> list[Any]:
+    values_by_header = {
+        "Desc": row.main_record.description,
+        "Planner": row.main_record.planner,
+        "GSD": row.main_record.buyer,
+        "Customer\n客户": row.customer,
+        "MODEL": row.model,
+        "MODELRemark\n机种": row.model_remark,
+        "LT": row.main_record.lt,
+        "MOQ": row.main_record.moq,
+        "Price（USD)": row.price,
+    }
+    return [values_by_header[header] for header in layout.info_headers]
+
+
+def _trailing_values(
+    row: _PreparedExcessRow,
+    formulas: dict[str, Any],
+    previous_total: float | None,
+    layout: ExcessLayout,
+) -> list[Any]:
+    values_by_header = {
+        "Vendor": None,
+        "reason&action": None,
+        "Customer\n客户": row.customer,
+        "MODEL": row.model,
+        "MODELRemark\n机种": row.model_remark,
+        "Category\n分类": None,
+        "Improve": formulas["improve"],
+        "Previous Excess Total AMT": previous_total,
+        "是否呆": None,
+    }
+    return [values_by_header[header] for header in layout.trailing_headers]
+
+
+def _metric_formula_key(header: str) -> str:
+    return {
+        "Excess\nstockQTY": "stock_qty",
+        "Excess\nstockAmount": "stock_amount",
+        "Excess\nPOQty": "po_qty",
+        "Excess\nPOAmount": "po_amount",
+        "Excess\nTotalAMT": "total_amount",
+    }[header]
+
+
 def _build_output_row(
     row: _PreparedExcessRow,
     part_column_count: int,
     demand_labels: tuple[str, ...],
-    include_excess_input_columns: bool,
+    layout: ExcessLayout,
     previous_excess_totals: PreviousExcessTotals | None,
     row_number: int,
     row2_headers: list[str],
@@ -294,23 +406,13 @@ def _build_output_row(
         row2_headers,
         part_column_count,
         demand_labels,
-        include_excess_input_columns=include_excess_input_columns,
+        include_excess_input_columns=layout.include_excess_input_columns,
     )
 
     values: list[Any] = (
         _pad(row.parts, part_column_count)
-        + [
-            row.main_record.description,
-            row.main_record.planner,
-            row.main_record.buyer,
-            row.customer,
-            row.model,
-            row.model_remark,
-            row.main_record.lt,
-            row.main_record.moq,
-            row.price,
-            formulas["overshortage_total"],
-        ]
+        + _info_values(row, layout)
+        + [formulas["overshortage_total"]]
         + _pad(row.overshortage_values, part_column_count, fill=0)
     )
 
@@ -320,25 +422,16 @@ def _build_output_row(
     values += [formulas["open_po_total"]]
     values += _pad(row.open_po_values, part_column_count, fill=0)
     values += [None]
+    values += [None] * layout.blank_columns_before_excess
 
     for excess_formulas in formulas["excess_groups"]:
         values += excess_formulas["input_values"]
         values += [
-            excess_formulas["po_qty"],
-            excess_formulas["po_amount"],
-            excess_formulas["stock_qty"],
-            excess_formulas["stock_amount"],
-            excess_formulas["total_amount"],
+            excess_formulas[_metric_formula_key(header)]
+            for header in layout.excess_metric_headers
         ]
 
-    values += [
-        None,
-        None,
-        None,
-        formulas["improve"],
-        previous_total,
-        None,
-    ]
+    values += _trailing_values(row, formulas, previous_total, layout)
     return values
 
 

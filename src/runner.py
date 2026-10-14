@@ -131,7 +131,8 @@ def generate_report(
 ) -> RunResult:
     input_dir = input_dir.resolve()
     output_file = output_file.resolve()
-    profile = profile_for(customer)
+    customer_code = resolve_customer(customer, input_dir, output_file)
+    profile = profile_for(customer_code)
 
     with Progress(PROGRESS_STEPS, enabled=show_progress) as progress:
         progress.step("Find BOM")
@@ -173,17 +174,20 @@ def generate_report(
             previous_excess_totals = None
             progress.message("找不到上一版來源，不輸出improve資訊")
         else:
-            previous_excess_totals = load_previous_excess_source(previous_report_file).totals
+            previous_excess_totals = load_previous_excess_source(
+                previous_report_file,
+                customer=customer_code,
+            ).totals
 
         progress.step("Build Excess rows")
-        customer_code = customer.upper() if customer else None
-        include_excess_input_columns = customer_code in CUSTOMERS
+        include_excess_input_columns = customer_code == "RAKEN"
         result = build_excess_rows(
             shortage_records,
             alternates,
             item_data,
             include_excess_input_columns=include_excess_input_columns,
             previous_excess_totals=previous_excess_totals,
+            customer=customer_code,
         )
 
         progress.step("Write Excel files")
@@ -193,6 +197,7 @@ def generate_report(
             result.row1_headers,
             result.row2_headers,
             result.part_column_count,
+            customer=customer_code,
         )
         next_time_output_file = output_file.with_name(NEXT_TIME_EXCESS_REPORT_NAME)
         if output_file.resolve() != next_time_output_file.resolve():
@@ -234,6 +239,23 @@ def customer_input_dir(root: Path, customer: str) -> Path:
 
 def customer_output_file(root: Path, customer: str) -> Path:
     return root / "output" / customer.upper() / "excess_report.xlsx"
+
+
+def resolve_customer(customer: str | None, *paths: Path | None) -> str | None:
+    if customer:
+        return customer.upper()
+
+    matches = {
+        part.upper()
+        for path in paths
+        if path is not None
+        for part in path.parts
+        if part.upper() in CUSTOMERS
+    }
+    if len(matches) > 1:
+        names = ", ".join(sorted(matches))
+        raise ValueError(f"Cannot infer one customer from paths: {names}")
+    return next(iter(matches), None)
 
 
 def select_customer_window() -> str | None:
@@ -381,13 +403,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     pause_after_run = is_frozen_app() and not args.no_pause
     try:
-        customer = args.customer
+        customer = args.customer.upper() if args.customer else None
         has_custom_paths = args.input_dir is not None or args.output_file is not None
         if customer is None and not has_custom_paths:
             customer = select_customer()
             if customer is None:
                 print("已取消執行。")
                 return 1
+            customer = customer.upper()
 
         if args.input_dir is not None:
             input_dir = args.input_dir
@@ -396,6 +419,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             input_dir = root / "input"
 
+        customer = resolve_customer(customer, input_dir, args.output_file)
+
         if args.output_file is not None:
             output_file = args.output_file
         elif customer is not None:
@@ -403,8 +428,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             output_file = root / "output" / "excess_report.xlsx"
 
+        customer = resolve_customer(customer, input_dir, output_file)
+
         if customer:
-            print(f"Customer: {customer.upper()}")
+            print(f"Customer: {customer}")
         generate_report(input_dir, output_file, customer=customer, show_progress=not args.no_progress)
         print("Done.")
         return 0
