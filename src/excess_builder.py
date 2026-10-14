@@ -21,10 +21,10 @@ INFO_HEADERS = [
     "Price（USD)",
 ]
 EXCESS_METRIC_HEADERS = [
-    "Excess\nstockQTY",
-    "Excess\nstockAmount",
     "Excess\nPOQty",
     "Excess\nPOAmount",
+    "Excess\nstockQTY",
+    "Excess\nstockAmount",
     "Excess\nTotalAMT",
 ]
 OTHER_DEMAND_HEADER = "others demand"
@@ -324,10 +324,10 @@ def _build_output_row(
     for excess_formulas in formulas["excess_groups"]:
         values += excess_formulas["input_values"]
         values += [
-            excess_formulas["stock_qty"],
-            excess_formulas["stock_amount"],
             excess_formulas["po_qty"],
             excess_formulas["po_amount"],
+            excess_formulas["stock_qty"],
+            excess_formulas["stock_amount"],
             excess_formulas["total_amount"],
         ]
 
@@ -386,10 +386,12 @@ def _row_formulas(
         total_amount = _cell_ref(row2_headers, _excess_header("Excess\nTotalAMT", label, demand_labels), row_number)
         input_values: list[Any] = []
         stock_qty_formula = f"=ROUND({overshortage_total}-{wo_total},0)"
+        po_outside_amount = None
         if include_excess_input_columns and other_demand is not None:
             stock_qty_formula = f"=ROUND({overshortage_total}-{wo_total}-{other_demand},0)"
-            po_outside_stock = _relative_cell_ref(stock_qty, row_number, -3)
-            po_outside_qty = _relative_cell_ref(stock_qty, row_number, -2)
+            po_outside_stock = _relative_cell_ref(po_qty, row_number, -3)
+            po_outside_qty = _relative_cell_ref(po_qty, row_number, -2)
+            po_outside_amount = _relative_cell_ref(po_qty, row_number, -1)
             if index == 0:
                 input_values.append(None)
             input_values += [
@@ -400,6 +402,12 @@ def _row_formulas(
         if not first_total_amount_ref:
             first_total_amount_ref = total_amount
 
+        total_amount_terms = f"{po_amount}+{stock_amount}"
+        total_amount_blank_checks = f'{po_amount}="",{stock_amount}=""'
+        if po_outside_amount is not None:
+            total_amount_terms += f"+{po_outside_amount}"
+            total_amount_blank_checks += f',{po_outside_amount}=""'
+
         wo_total_formulas.append(f"=ROUND(SUM({wo_first}:{wo_last}),0)")
         excess_groups.append(
             {
@@ -408,7 +416,7 @@ def _row_formulas(
                 "stock_amount": f'=IF({price}="","",ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
                 "po_qty": f"=ROUND(IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total}),0)",
                 "po_amount": f'=IF({price}="","",ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
-                "total_amount": f'=IF(OR({po_amount}="",{stock_amount}=""),0,ROUND({po_amount}+{stock_amount},0))',
+                "total_amount": f"=IF(OR({total_amount_blank_checks}),0,ROUND({total_amount_terms},0))",
             }
         )
 

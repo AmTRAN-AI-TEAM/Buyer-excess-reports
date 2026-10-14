@@ -27,6 +27,7 @@ class _PreviousColumns:
     first_demand_details: tuple[int, ...]
     open_po_details: tuple[int, ...]
     other_demand: int | None
+    po_outside_stock: int | None
 
 
 def find_previous_excess_report(input_dir: Path) -> Path | None:
@@ -100,6 +101,7 @@ def _detect_previous_columns(headers: tuple[Any, ...]) -> _PreviousColumns:
             if base.startswith("Open po")
         ),
         other_demand=_optional_base_column(bases, "others demand"),
+        po_outside_stock=_optional_base_column(bases, "PO外備料"),
     )
 
 
@@ -124,7 +126,18 @@ def _previous_total_amount(
     stock_amount = _round_integer(max(stock_qty, 0) * price)
     po_qty = _round_integer(open_po_total if stock_qty > 0 else stock_qty + open_po_total)
     po_amount = _round_integer(po_qty * price if po_qty > 0 else 0)
-    return float(_round_integer(stock_amount + po_amount))
+    po_outside_stock = (
+        _number(_cell(row, columns.po_outside_stock))
+        if columns.po_outside_stock is not None
+        else 0.0
+    )
+    po_outside_qty = (
+        po_outside_stock
+        if po_qty > 0
+        else max(po_outside_stock + po_qty, 0)
+    )
+    po_outside_amount = _round_integer(po_outside_qty * price)
+    return float(_round_integer(stock_amount + po_amount + po_outside_amount))
 
 
 def _row_parts(

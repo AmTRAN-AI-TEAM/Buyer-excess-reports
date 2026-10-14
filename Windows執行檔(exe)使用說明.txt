@@ -61,7 +61,7 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 4. 輸出的 Excess sheet 會將數值欄負數以紅色顯示。
 5. AVTC 的 Price 會使用 Item workbook 內 Price sheet 的 Uprice；RAKEN 會使用獨立 Price 檔的 USD。同料號多筆資料時優先取 Allocation 最大的那筆。
 6. shortage 的 COMPONENT_ITEM 會視為 Part No 使用。
-7. AVTC 與 RAKEN 輸出都會在第一個 Excess 區塊前插入 others demand，並在每個 Excess 區塊前插入 PO外備料、PO外備料QTY、PO外備料AMT。
+7. AVTC 與 RAKEN 輸出都會在第一個 Excess 區塊前插入 others demand，並在每個 Excess 區塊前插入 PO外備料、PO外備料QTY、PO外備料AMT；每段 Excess 欄位順序為 POQty、POAmount、stockQTY、stockAmount、TotalAMT，TotalAMT 會加總 POAmount、stockAmount、PO外備料AMT。
 8. 替代料採嚴格 BOM 使用情境規則；若主料在其他 BOM 使用情境沒有同一替代料，該替代關係不會合併。
 9. 不完全替代明細會另外輸出 incomplete_alternates.xlsx；每個不完全替代群組內，同一料號只列一行，Model 會彙總該料號在 BOM B 欄出現過的所有機種，Spec 來源為 BOM 的 COMPONENT_DESCRIPTION 第一個非空值。
 10. 程式每次會多輸出 next_time_excess_report.xlsx；下次若要計算 Improve，請將上一版的 next_time_excess_report.xlsx 放入對應 input 資料夾。若找不到檔名包含 next_time 的上一版來源，程式會顯示「找不到上一版來源，不輸出improve資訊」。

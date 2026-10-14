@@ -99,7 +99,8 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_r
 - 程式每次會多輸出 `next_time_excess_report.xlsx`。若下次執行時 input 資料夾內有檔名包含 `next_time` 的 Excel，程式會將它視為上一版來源，用第一個 `Excess TotalAMT` 區間帶入 `Previous Excess Total AMT`，並輸出 `Improve` 公式；若找不到上一版來源，終端機會顯示 `找不到上一版來源，不輸出improve資訊`，且 `Improve` 維持空白。
 - 數量與金額運算結果會四捨五入到整數輸出；`Price（USD)` 保留兩位小數。
 - 輸出會預設隱藏 `Overshortage1` 到 `OvershortageN`、各時間區間的 `WO 外demand1` 到 `WO 外demandN`、以及 `Open po1` 到 `Open poN` 細項欄，保留總欄位顯示。
-- `Excess TotalAMT` 會以第一個 Excess 時間區間由高到低排序；沒有價格而顯示空白的列會排在最後。
+- 每段 Excess 欄位順序為 `Excess POQty`、`Excess POAmount`、`Excess stockQTY`、`Excess stockAmount`、`Excess TotalAMT`。
+- `Excess TotalAMT` 會加總 `Excess POAmount`、`Excess stockAmount`、`PO外備料AMT`，並以第一個 Excess 時間區間由高到低排序；沒有價格而顯示空白的列會排在最後。
 - AVTC 與 RAKEN 輸出都會在第一個 Excess 區塊前插入 `others demand`，並在每個 Excess 區塊前插入 `PO外備料`、`PO外備料QTY`、`PO外備料AMT`。其中 `others demand` 與 `PO外備料` 由使用者填寫，`PO外備料QTY` 與 `PO外備料AMT` 由公式計算。
 - AVTC 與 RAKEN 每段 `Excess stockQTY` 會扣除該時間區間的 `WO外demand`，並再扣除 `others demand`。
 - 輸出的 Excel 會套用 `Microsoft YaHei` 9 號字體，標題會依資料區域套用不同底色，數值欄負數會以紅色顯示。

@@ -14,10 +14,10 @@ NEGATIVE_RED_INTEGER_FORMAT = "#,##0;[Red]-#,##0"
 NEGATIVE_RED_DECIMAL_FORMAT = "#,##0.00;[Red]-#,##0.00"
 TOTAL_AMOUNT_SORT_FORMAT = "#,##0;;0"
 EXCESS_BASE_HEADERS = [
-    "Excess\nstockQTY",
-    "Excess\nstockAmount",
     "Excess\nPOQty",
     "Excess\nPOAmount",
+    "Excess\nstockQTY",
+    "Excess\nstockAmount",
     "Excess\nTotalAMT",
 ]
 
