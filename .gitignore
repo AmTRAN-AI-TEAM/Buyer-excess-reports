@@ -1,6 +1,10 @@
 .venv/
 __pycache__/
 *.py[cod]
+build/
+release/
+*.spec
+.app_state/
 
 input/*
 !input/.gitkeep

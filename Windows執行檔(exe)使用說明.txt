@@ -43,9 +43,13 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 
 1. 關閉已開啟的輸出檔，避免 Excel 鎖住檔案。
 2. 雙擊 BuyerExcessReports.exe。
-3. 在視窗選擇 AVTC 或 RAKEN。
-4. 等待 console 的 tqdm 進度條跑完並顯示 Done。
-5. 到對應 output 資料夾取得報表：
+3. 在「Excess報表整理器」首頁按 Start，再選擇 AVTC 或 RAKEN。
+4. 依提示框逐項確認來源檔案。若有缺漏，按「有缺漏，打開input資料夾」，補齊檔案後回到提示框按「確認無誤」。
+5. 介面會顯示執行紀錄與 11 個處理階段的進度，不會開啟終端機。處理中請保持程式開啟；各階段耗時不同。
+6. 完成後顯示「已完成，打開output資料夾取檔案」。按「確認」會開啟所選工廠的 output 資料夾並關閉程式。
+7. 如果發生錯誤，會顯示出錯檔案、處理階段、原因與建議。按「確認」後關閉程式，請修正後重新啟動；只有所有報表都成功寫入才會提示完成。
+
+輸出檔案如下：
    output/AVTC/excess_report.xlsx
    output/AVTC/next_time_excess_report.xlsx
    output/AVTC/incomplete_alternates.xlsx
@@ -69,3 +73,7 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 12. RAKEN 會依料號配對，將上一版 MODEL、第一段 PO外備料 QTY、reason&action、Vendor 的人工更新承接到兩份新報表。輸入支援舊版、新版欄名；輸出不會增加操作備註列。
 13. RAKEN 使用上一版 Customer sheet 的 MODEL、Customer 對照表更新客戶資訊。多機種以 / 分隔，全部查到才合併客戶；查不到、MODEL 空白或對應衝突時，保留本期原客戶並顯示提示。兩份輸出都會保留 Customer 對照表；沒有來源時建立空白對照表。
 14. AVTC 會依主料號／完整替代料群組配對，將上一版 next_time 的 reason&action、Vendor 承接到兩份新報表，包含多行文字與刻意清空的儲存格；新料號這兩欄維持空白。AVTC 的 MODEL、Customer 仍取本期資料。Improve 以本期第一段金額減上一版第一段金額，上一版使用上一版的單價計算。
+15. 背景圖片已隨軟體放在 _internal 內，不需要原本 Downloads 的圖片。請完整保留整包資料夾。
+16. next_time_excess_report 是可選檔案，未放入時仍可產生本期報表；若有放入，則需為有效且可辨識的上一版報表。
+17. 執行紀錄已放大字體，百分比旁會顯示預估剩餘時間，每秒更新。初次執行先顯示「估算中」，累積足夠資料後提供粗估；時間超出預估時顯示「重新估算中」。顯示時間會隨資料量與電腦效能調整。
+18. 程式會分別記錄 AVTC、RAKEN 最近五次成功執行的階段耗時，保存在軟體資料夾的 .app_state/run_timings.json，供後續預估使用。此檔案由程式自動管理，遺失或無法保存時仍可產生報表。

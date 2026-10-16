@@ -9,6 +9,8 @@ from typing import Any
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from report_errors import file_context
+
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 DEFAULT_DEMAND_LABEL = "WO外demand"
@@ -169,11 +171,14 @@ def find_shortage_source(input_dir: Path, bom_file: Path) -> ShortageSource:
         if workbook_path.resolve() == bom_file.resolve():
             continue
 
-        workbook = load_workbook(workbook_path, read_only=True, data_only=True)
-        for sheet_name in workbook.sheetnames:
-            if "shortage" in sheet_name.lower():
-                matches.append(ShortageSource(workbook_path, sheet_name))
-        workbook.close()
+        with file_context(workbook_path, "檢查 Excel 的 Shortage 工作表"):
+            workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+            try:
+                for sheet_name in workbook.sheetnames:
+                    if "shortage" in sheet_name.lower():
+                        matches.append(ShortageSource(workbook_path, sheet_name))
+            finally:
+                workbook.close()
 
     if len(matches) == 1:
         return matches[0]
@@ -290,36 +295,41 @@ def load_item_workbook_data(
     price_headers: tuple[str, ...] = ("Uprice",),
     preferred_cost_sheet: str | None = None,
 ) -> ItemWorkbookData:
-    workbook = load_workbook(item_path, read_only=True, data_only=True)
-    try:
-        item_sheet = _find_item_sheet(workbook)
-        metadata = _load_item_metadata(workbook[item_sheet])
-        preferred_prices: dict[str, float] = {}
-        cost_sheet = _find_sheet_or_none(workbook.sheetnames, preferred_cost_sheet) if preferred_cost_sheet else None
-        if cost_sheet is not None:
-            preferred_prices = {
-                part: price
-                for part, price in _load_prices(
-                    workbook[cost_sheet], ("US Unit Cost",), part_headers=("Item",),
-                ).items()
-                if isfinite(price)
-            }
-    finally:
-        workbook.close()
+    with file_context(item_path, "讀取 Item 資料"):
+        workbook = load_workbook(item_path, read_only=True, data_only=True)
+        try:
+            item_sheet = _find_item_sheet(workbook)
+            with file_context(item_path, "讀取 Item 資料", item_sheet):
+                metadata = _load_item_metadata(workbook[item_sheet])
+            preferred_prices: dict[str, float] = {}
+            cost_sheet = _find_sheet_or_none(workbook.sheetnames, preferred_cost_sheet) if preferred_cost_sheet else None
+            if cost_sheet is not None:
+                with file_context(item_path, "讀取成本價資料", cost_sheet):
+                    preferred_prices = {
+                        part: price
+                        for part, price in _load_prices(
+                            workbook[cost_sheet], ("US Unit Cost",), part_headers=("Item",),
+                        ).items()
+                        if isfinite(price)
+                    }
+        finally:
+            workbook.close()
 
     price_workbook_path = price_path or item_path
-    price_workbook = load_workbook(price_workbook_path, read_only=True, data_only=True)
-    try:
+    with file_context(price_workbook_path, "讀取 Price 資料"):
+        price_workbook = load_workbook(price_workbook_path, read_only=True, data_only=True)
         try:
-            price_sheet = _find_price_sheet(price_workbook, price_headers)
-        except ValueError:
-            if not preferred_prices:
-                raise
-            prices = {}
-        else:
-            prices = _load_prices(price_workbook[price_sheet], price_headers)
-    finally:
-        price_workbook.close()
+            try:
+                price_sheet = _find_price_sheet(price_workbook, price_headers)
+            except ValueError:
+                if not preferred_prices:
+                    raise
+                prices = {}
+            else:
+                with file_context(price_workbook_path, "讀取 Price 資料", price_sheet):
+                    prices = _load_prices(price_workbook[price_sheet], price_headers)
+        finally:
+            price_workbook.close()
 
     # A numeric zero is a valid cost and must override the fallback price too.
     prices.update(preferred_prices)

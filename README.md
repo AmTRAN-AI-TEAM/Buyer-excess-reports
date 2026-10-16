@@ -14,6 +14,8 @@ buyer-excess-reports/
   output/
     AVTC/
     RAKEN/
+  assets/
+    app_background.png
   src/
 ```
 
@@ -27,6 +29,22 @@ pip install -r requirements.txt
 ```
 
 ## 使用
+
+桌面介面可執行：
+
+```bash
+python3 generate_buyer_excess_report.py
+```
+
+首頁使用 `assets/app_background.png` 作為背景。按 Start、選擇 AVTC 或 RAKEN，再依確認視窗的清單準備來源檔。「有缺漏，打開input資料夾」會開啟所選工廠的資料夾，保留確認視窗；補齊後按「確認無誤」開始。
+
+處理期間，介面會顯示即時執行紀錄與 11 個階段的進度。進度代表已完成的階段數，各階段耗時不同。所有報表都成功寫入後才會提示完成；按「確認」開啟對應 output 資料夾並關閉程式。若失敗，提示框會顯示實際檔案、處理階段及原因，按「確認」後關閉程式。處理中不接受關閉視窗，請等待結果。
+
+執行紀錄以 16px 為基準顯示，增加行距與紀錄區高度。百分比旁會顯示「預估剩餘：分:秒」，每秒更新；超過一小時則顯示「時:分:秒」。首次執行會先顯示「估算中」，累積足夠的實際階段耗時後提供粗估；後續依各工廠最近五次成功執行的階段耗時，以及當次處理速度調整估算。時間超出預估時顯示「重新估算中」，全部輸出完成後才改為「已完成」；失敗則顯示「已停止」。
+
+耗時紀錄自動保存在軟體資料夾的 `.app_state/run_timings.json`，不需手動準備。紀錄遺失、損壞或無法讀寫時，仍可產生報表。預估時間會隨來源資料量與電腦效能改變。
+
+命令列仍可使用下方的 `src/main.py` 與路徑參數。
 
 把輸入檔放進對應客戶資料夾：
 
@@ -126,7 +144,9 @@ build_exe.bat
 release/BuyerExcessReports/BuyerExcessReports.exe
 ```
 
-使用者收到整個 `BuyerExcessReports` 資料夾後，只要把檔案放進 `input/AVTC` 或 `input/RAKEN`，再雙擊 exe 並選擇客戶即可。
+使用者收到整個 `BuyerExcessReports` 資料夾後，只要把檔案放進 `input/AVTC` 或 `input/RAKEN`，再雙擊 exe、按 Start 並選擇工廠即可。Windows 版本使用 `--windowed` 打包，執行期間不會開啟終端機；圖片、Tkinter 與 Pillow 都會一起打包，使用者不需要安裝 Python，也不需要原本 Downloads 的圖片。
+
+請在 Windows 執行 `build_exe.bat`，產生可供 Windows 使用的執行檔。
 
 ## 自訂路徑
 

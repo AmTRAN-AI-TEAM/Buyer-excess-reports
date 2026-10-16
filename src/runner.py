@@ -5,7 +5,8 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from time import monotonic
+from typing import Callable, Sequence
 
 try:
     from tqdm import tqdm
@@ -18,6 +19,7 @@ from excess_builder import build_excess_rows
 from formatting import write_excess_workbook
 from incomplete_alternates import write_incomplete_alternates_workbook
 from previous_report import find_previous_excess_report, load_previous_excess_source
+from report_errors import file_context
 from workbook_io import (
     find_bom_file,
     find_item_file,
@@ -29,8 +31,24 @@ from workbook_io import (
 
 
 CUSTOMERS = ("AVTC", "RAKEN")
-PROGRESS_STEPS = 11
+PROGRESS_LABELS = (
+    "Find BOM", "Find Item workbook", "Find shortage sheet", "Find previous Excess report",
+    "Read BOM alternates", "Read Item/Price data", "Read shortage data", "Read previous Excess data",
+    "Build Excess rows", "Write Excel files", "Write incomplete alternates file",
+)
+PROGRESS_STEPS = len(PROGRESS_LABELS)
 NEXT_TIME_EXCESS_REPORT_NAME = "next_time_excess_report.xlsx"
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    kind: str
+    current: int
+    total: int
+    label: str = ""
+    message: str = ""
+    elapsed_seconds: float = 0.0
+    stage_durations: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,15 +67,25 @@ class RunResult:
 
 
 class Progress:
-    def __init__(self, total: int, enabled: bool = True):
+    def __init__(self, total: int, enabled: bool = True, callback: Callable[[ProgressEvent], None] | None = None):
         self.total = total
         self.enabled = enabled
         self.current = 0
         self.active_label: str | None = None
         self.bar = None
+        self.callback = callback
+        self.started_at = monotonic()
+        self.active_started_at = self.started_at
+        self.stage_durations: dict[str, float] = {}
+
+    def _event(self, kind: str, *, label: str = "", message: str = "") -> ProgressEvent:
+        return ProgressEvent(
+            kind, self.current, self.total, label, message,
+            max(0.0, monotonic() - self.started_at), tuple(self.stage_durations.items()),
+        )
 
     def __enter__(self) -> "Progress":
-        if self.enabled and tqdm is not None and self.total > 0 and sys.stdout.isatty():
+        if self.callback is None and self.enabled and tqdm is not None and self.total > 0 and sys.stdout is not None and sys.stdout.isatty():
             self.bar = tqdm(
                 total=self.total,
                 desc="Buyer Excess Reports",
@@ -70,17 +98,23 @@ class Progress:
     def step(self, label: str) -> None:
         self._complete_active_step()
         self.active_label = label
+        self.active_started_at = monotonic()
+        if self.callback is not None:
+            self.callback(self._event("progress", label=label))
+            return
         if self.bar is not None:
             self.bar.set_description_str(label)
             return
 
-        if self.enabled:
+        if self.enabled and sys.stdout is not None:
             print(f"[{self.current}/{self.total}] {label}", flush=True)
 
     def message(self, message: str) -> None:
-        if self.bar is not None:
+        if self.callback is not None:
+            self.callback(self._event("message", message=message))
+        elif self.bar is not None:
             self.bar.write(message)
-        else:
+        elif sys.stdout is not None:
             print(message)
 
     def warnings(self, messages: Sequence[str]) -> None:
@@ -108,9 +142,11 @@ class Progress:
             if self.bar is not None:
                 self.bar.update(remaining)
 
-        if self.bar is not None:
+        if self.callback is not None:
+            self.callback(self._event("progress", label="Done"))
+        elif self.bar is not None:
             self.bar.set_description_str("Done")
-        elif self.enabled:
+        elif self.enabled and sys.stdout is not None:
             print(f"[{self.current}/{self.total}] Done", flush=True)
 
     def _complete_active_step(self) -> None:
@@ -118,6 +154,8 @@ class Progress:
             return
 
         self.current += 1
+        self.stage_durations[self.active_label] = max(0.0, monotonic() - self.active_started_at)
+        self.active_label = None
         if self.bar is not None:
             self.bar.update(1)
 
@@ -138,25 +176,31 @@ def generate_report(
     *,
     customer: str | None = None,
     show_progress: bool = True,
+    on_event: Callable[[ProgressEvent], None] | None = None,
 ) -> RunResult:
     input_dir = input_dir.resolve()
     output_file = output_file.resolve()
     customer_code = resolve_customer(customer, input_dir, output_file)
     profile = profile_for(customer_code)
 
-    with Progress(PROGRESS_STEPS, enabled=show_progress) as progress:
+    with Progress(PROGRESS_STEPS, enabled=show_progress, callback=on_event) as progress:
         progress.step("Find BOM")
-        bom_file = find_bom_file(input_dir)
+        with file_context(input_dir, "尋找 BOM 檔案"):
+            bom_file = find_bom_file(input_dir)
 
         progress.step("Find Item workbook")
-        item_file = find_item_file(input_dir)
-        price_file = find_price_file(input_dir) if profile and profile.separate_price_file else None
+        with file_context(input_dir, "尋找 Item 檔案"):
+            item_file = find_item_file(input_dir)
+        with file_context(input_dir, "尋找 Price 檔案"):
+            price_file = find_price_file(input_dir) if profile and profile.separate_price_file else None
 
         progress.step("Find shortage sheet")
-        shortage_source = find_shortage_source(input_dir, bom_file)
+        with file_context(input_dir, "尋找 Shortage 工作表"):
+            shortage_source = find_shortage_source(input_dir, bom_file)
 
         progress.step("Find previous Excess report")
-        previous_report_file = find_previous_excess_report(input_dir)
+        with file_context(input_dir, "尋找上一版報表"):
+            previous_report_file = find_previous_excess_report(input_dir)
 
         progress.message(f"BOM: {bom_file}")
         progress.message(f"Item: {item_file}")
@@ -167,18 +211,21 @@ def generate_report(
             progress.message(f"Previous Excess: {previous_report_file}")
 
         progress.step("Read BOM alternates")
-        alternates = load_bom_alternates(bom_file)
+        with file_context(bom_file, "讀取 BOM 替代料"):
+            alternates = load_bom_alternates(bom_file)
 
         progress.step("Read Item/Price data")
-        item_data = load_item_workbook_data(
-            item_file,
-            price_path=price_file,
-            price_headers=profile.price_headers if profile else ("Uprice",),
-            preferred_cost_sheet=profile.preferred_cost_sheet if profile else None,
-        )
+        with file_context(item_file, "讀取 Item／Price 資料"):
+            item_data = load_item_workbook_data(
+                item_file,
+                price_path=price_file,
+                price_headers=profile.price_headers if profile else ("Uprice",),
+                preferred_cost_sheet=profile.preferred_cost_sheet if profile else None,
+            )
 
         progress.step("Read shortage data")
-        shortage_records = load_shortage_records(shortage_source)
+        with file_context(shortage_source.path, "讀取 Shortage 資料", shortage_source.sheet_name):
+            shortage_records = load_shortage_records(shortage_source)
 
         progress.step("Read previous Excess data")
         previous_source = None
@@ -187,10 +234,11 @@ def generate_report(
             previous_excess_totals = None
             warning_messages.append("找不到上一版來源，不輸出improve資訊")
         else:
-            previous_source = load_previous_excess_source(
-                previous_report_file,
-                customer=customer_code,
-            )
+            with file_context(previous_report_file, "讀取上一版報表"):
+                previous_source = load_previous_excess_source(
+                    previous_report_file,
+                    customer=customer_code,
+                )
             previous_excess_totals = previous_source.totals
             warning_messages.extend(previous_source.warnings)
 
@@ -208,29 +256,32 @@ def generate_report(
         progress.warnings([*warning_messages, *result.warnings])
 
         progress.step("Write Excel files")
-        write_excess_workbook(
-            result.rows,
-            output_file,
-            result.row1_headers,
-            result.row2_headers,
-            result.part_column_count,
-            customer=customer_code,
-            customer_sheet_rows=(
-                previous_source.inputs.customer_lookup.sheet_rows
-                if previous_source and previous_source.inputs and previous_source.inputs.customer_lookup
-                else None
-            ),
-        )
+        with file_context(output_file, "寫入 Excess 報表"):
+            write_excess_workbook(
+                result.rows,
+                output_file,
+                result.row1_headers,
+                result.row2_headers,
+                result.part_column_count,
+                customer=customer_code,
+                customer_sheet_rows=(
+                    previous_source.inputs.customer_lookup.sheet_rows
+                    if previous_source and previous_source.inputs and previous_source.inputs.customer_lookup
+                    else None
+                ),
+            )
         next_time_output_file = output_file.with_name(NEXT_TIME_EXCESS_REPORT_NAME)
         if output_file.resolve() != next_time_output_file.resolve():
-            shutil.copyfile(output_file, next_time_output_file)
+            with file_context(next_time_output_file, "寫入下次使用的上一版報表"):
+                shutil.copyfile(output_file, next_time_output_file)
 
         progress.step("Write incomplete alternates file")
         incomplete_alternates_file = output_file.with_name("incomplete_alternates.xlsx")
-        write_incomplete_alternates_workbook(
-            alternates.incomplete_alternate_groups,
-            incomplete_alternates_file,
-        )
+        with file_context(incomplete_alternates_file, "寫入不完全替代料明細"):
+            write_incomplete_alternates_workbook(
+                alternates.incomplete_alternate_groups,
+                incomplete_alternates_file,
+            )
 
         progress.message(f"Read shortage parts: {result.input_part_count}")
         progress.message(f"Generated Excess rows: {result.output_row_count}")
@@ -374,7 +425,7 @@ def _center_tk_window(root) -> None:
 
 
 def pause_for_windows_exe(enabled: bool) -> None:
-    if not enabled:
+    if not enabled or sys.stdin is None:
         return
     try:
         input("\n按 Enter 結束...")

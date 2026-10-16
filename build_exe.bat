@@ -40,11 +40,14 @@ if exist release\BuyerExcessReports rmdir /s /q release\BuyerExcessReports
 %PYTHON_CMD% -m PyInstaller ^
   --clean ^
   --onedir ^
-  --console ^
+  --windowed ^
   --paths src ^
+  --add-data "%~dp0assets:assets" ^
   --hidden-import tkinter ^
   --hidden-import tkinter.ttk ^
   --hidden-import tkinter.messagebox ^
+  --hidden-import PIL.ImageTk ^
+  --hidden-import PIL._tkinter_finder ^
   --hidden-import tqdm ^
   --name BuyerExcessReports ^
   --distpath release ^
@@ -58,11 +61,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-release\BuyerExcessReports\BuyerExcessReports.exe --help >nul
-if errorlevel 1 (
+if not exist "release\BuyerExcessReports\BuyerExcessReports.exe" (
     echo.
-    echo Build output failed the startup check.
-    echo Please run release\BuyerExcessReports\BuyerExcessReports.exe from Command Prompt to see the error.
+    echo Build output is missing BuyerExcessReports.exe.
     pause
     exit /b 1
 )

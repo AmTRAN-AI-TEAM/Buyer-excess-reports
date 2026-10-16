@@ -12,7 +12,12 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from runner import main  # noqa: E402
+def main() -> int:
+    if not sys.argv[1:] or sys.argv[1:] == ["--gui"]:
+        from gui import main as gui_main
+        return gui_main()
+    from runner import main as runner_main
+    return runner_main()
 
 
 if __name__ == "__main__":
