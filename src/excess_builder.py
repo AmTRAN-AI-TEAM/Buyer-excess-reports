@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from typing import Any
 
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from bom_alternates import BomAlternates
+from report_history import PreviousExcessInputs, previous_value_for
 from workbook_io import ItemWorkbookData, ShortageRecord
 
 
@@ -43,9 +45,9 @@ AVTC_EXCESS_METRIC_HEADERS = [
     "Excess\nTotalAMT",
 ]
 OTHER_DEMAND_HEADER = "others demand"
-PO_OUTSIDE_STOCK_HEADER = "PO外備料"
-PO_OUTSIDE_QTY_HEADER = "PO外備料QTY"
-PO_OUTSIDE_AMOUNT_HEADER = "PO外備料AMT"
+PO_OUTSIDE_STOCK_HEADER = "PO外備料 QTY"
+PO_OUTSIDE_QTY_HEADER = "Excess PO外備料QTY"
+PO_OUTSIDE_AMOUNT_HEADER = "Excess  PO外備料AMT"
 PO_OUTSIDE_HEADERS = [
     PO_OUTSIDE_STOCK_HEADER,
     PO_OUTSIDE_QTY_HEADER,
@@ -80,6 +82,7 @@ class ExcessLayout:
     excess_metric_headers: tuple[str, ...]
     include_excess_input_columns: bool = False
     blank_columns_before_excess: int = 0
+    after_first_excess_headers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,7 @@ class ExcessBuildResult:
     input_part_count: int
     output_row_count: int
     demand_labels: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,13 +103,7 @@ class PreviousExcessTotals:
     totals_by_group: dict[tuple[str, ...], float]
 
     def total_for(self, parts: list[str]) -> float | None:
-        part_key = _part_key(parts[0]) if parts else None
-        if part_key and part_key in self.totals_by_part:
-            return self.totals_by_part[part_key]
-        group_key = _parts_group_key(parts)
-        if group_key:
-            return self.totals_by_group.get(group_key)
-        return None
+        return previous_value_for(parts, self.totals_by_part, self.totals_by_group)
 
 
 @dataclass(frozen=True)
@@ -122,6 +120,7 @@ class _PreparedExcessRow:
     customer: str | None
     model: str | None
     model_remark: str | None
+    carried_values: dict[str, Any] = field(default_factory=dict)
 
 
 def build_excess_rows(
@@ -131,10 +130,14 @@ def build_excess_rows(
     *,
     include_excess_input_columns: bool = False,
     previous_excess_totals: PreviousExcessTotals | None = None,
+    previous_excess_inputs: PreviousExcessInputs | None = None,
     customer: str | None = None,
 ) -> ExcessBuildResult:
     item_data = item_data or ItemWorkbookData(metadata_by_part={}, prices_by_part={})
     layout = _layout_for_customer(customer, include_excess_input_columns)
+    carry_inputs = previous_excess_inputs if customer and customer.upper() == "RAKEN" else None
+    lookup_warnings: Counter[str] = Counter()
+    warning_examples: dict[str, list[str]] = defaultdict(list)
     demand_labels = _demand_labels(shortage_records)
     records_by_part = {record.part_no: record for record in shortage_records}
     known_parts = set(records_by_part)
@@ -187,6 +190,17 @@ def build_excess_rows(
             active_parts=active_parts,
         ) or item_data.model_summary(displayed_parts)
         model_remark = alternates.model_remark_summary(displayed_parts)
+        carried_values = carry_inputs.values_for(displayed_parts) if carry_inputs else {}
+        model = carried_values.get("MODEL", model)
+        if carry_inputs and carry_inputs.customer_lookup is not None:
+            mapped_customer, issue = carry_inputs.customer_lookup.resolve(model)
+            if issue is None:
+                customer_summary = mapped_customer
+            else:
+                lookup_warnings[issue] += 1
+                example = str(model) if model not in (None, "") else "（空白）"
+                if example not in warning_examples[issue] and len(warning_examples[issue]) < 5:
+                    warning_examples[issue].append(example)
 
         prepared_rows.append(
             _PreparedExcessRow(
@@ -202,6 +216,7 @@ def build_excess_rows(
                 customer=customer_summary,
                 model=model,
                 model_remark=model_remark,
+                carried_values=carried_values,
             )
         )
         part_column_count = max(part_column_count, len(displayed_parts))
@@ -240,6 +255,10 @@ def build_excess_rows(
         input_part_count=len(shortage_records),
         output_row_count=len(rows),
         demand_labels=demand_labels,
+        warnings=tuple(
+            f"Customer 查表：{issue} {count} 列，保留原有 Customer；例如：{'、'.join(warning_examples[issue])}"
+            for issue, count in lookup_warnings.items()
+        ),
     )
 
 
@@ -266,6 +285,8 @@ def build_row1_headers(
             )
         )
         headers += [_group_header("Excess", label, demand_labels)] + [None] * (len(layout.excess_metric_headers) - 1)
+        if index == 0:
+            headers += [None] * len(layout.after_first_excess_headers)
     headers += [None] * len(layout.trailing_headers)
     return headers
 
@@ -299,6 +320,8 @@ def build_row2_headers(
             is_first_group=index == 0,
         )
         headers += [_excess_header(header, label, demand_labels) for header in layout.excess_metric_headers]
+        if index == 0:
+            headers += list(layout.after_first_excess_headers)
     headers += list(layout.trailing_headers)
     return headers
 
@@ -329,10 +352,14 @@ def _layout_for_customer(
         )
     return ExcessLayout(
         info_headers=tuple(INFO_HEADERS),
-        trailing_headers=tuple(TRAILING_HEADERS),
+        trailing_headers=tuple(
+            header for header in TRAILING_HEADERS
+            if customer_code != "RAKEN" or header not in {"Vendor", "reason&action"}
+        ),
         excess_metric_headers=tuple(EXCESS_METRIC_HEADERS),
         include_excess_input_columns=include_excess_input_columns
         or customer_code == "RAKEN",
+        after_first_excess_headers=("reason&action", "Vendor") if customer_code == "RAKEN" else (),
     )
 
 
@@ -364,8 +391,8 @@ def _trailing_values(
     layout: ExcessLayout,
 ) -> list[Any]:
     values_by_header = {
-        "Vendor": None,
-        "reason&action": None,
+        "Vendor": row.carried_values.get("Vendor"),
+        "reason&action": row.carried_values.get("reason&action"),
         "Customer\n客户": row.customer,
         "MODEL": row.model,
         "MODELRemark\n机种": row.model_remark,
@@ -407,6 +434,7 @@ def _build_output_row(
         part_column_count,
         demand_labels,
         include_excess_input_columns=layout.include_excess_input_columns,
+        po_outside_stock_value=row.carried_values.get(PO_OUTSIDE_STOCK_HEADER),
     )
 
     values: list[Any] = (
@@ -424,12 +452,14 @@ def _build_output_row(
     values += [None]
     values += [None] * layout.blank_columns_before_excess
 
-    for excess_formulas in formulas["excess_groups"]:
+    for index, excess_formulas in enumerate(formulas["excess_groups"]):
         values += excess_formulas["input_values"]
         values += [
             excess_formulas[_metric_formula_key(header)]
             for header in layout.excess_metric_headers
         ]
+        if index == 0:
+            values += [row.carried_values.get(header) for header in layout.after_first_excess_headers]
 
     values += _trailing_values(row, formulas, previous_total, layout)
     return values
@@ -442,6 +472,7 @@ def _row_formulas(
     demand_labels: tuple[str, ...],
     *,
     include_excess_input_columns: bool = False,
+    po_outside_stock_value: Any = None,
 ) -> dict[str, Any]:
     overshortage_total = _cell_ref(row2_headers, "Overshortage", row_number)
     overshortage_first = _cell_ref(row2_headers, "Overshortage1", row_number)
@@ -463,6 +494,10 @@ def _row_formulas(
         _cell_ref(row2_headers, OTHER_DEMAND_HEADER, row_number)
         if include_excess_input_columns
         else None
+    )
+    first_po_outside_stock = (
+        _cell_ref(row2_headers, PO_OUTSIDE_STOCK_HEADER, row_number)
+        if include_excess_input_columns else None
     )
     for index, label in enumerate(demand_labels):
         wo_total = _cell_ref(row2_headers, _demand_total_header(label, demand_labels), row_number)
@@ -488,7 +523,7 @@ def _row_formulas(
             if index == 0:
                 input_values.append(None)
             input_values += [
-                None,
+                po_outside_stock_value if index == 0 else f"={first_po_outside_stock}",
                 f"=IF({po_qty}>0,{po_outside_stock},IF(({po_outside_stock}+{po_qty})>0,({po_outside_stock}+{po_qty}),0))",
                 f"={po_outside_qty}*{price}",
             ]
@@ -531,18 +566,6 @@ def _relative_cell_ref(cell_ref: str, row_number: int, column_offset: int) -> st
     column_letters = cell_ref.removesuffix(str(row_number))
     column = get_column_letter(column_index_from_string(column_letters) + column_offset)
     return f"{column}{row_number}"
-
-
-def _part_key(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _parts_group_key(parts: list[str]) -> tuple[str, ...] | None:
-    values = sorted({part for part in (_part_key(part) for part in parts) if part})
-    return tuple(values) if values else None
 
 
 def _shortage_aware_group(

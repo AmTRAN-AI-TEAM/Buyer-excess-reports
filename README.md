@@ -97,11 +97,15 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_r
 - `Price（USD)` 來源依客戶 profile 讀取：AVTC 使用 `Uprice`，RAKEN 使用獨立 Price 檔的 `USD`；同料號多筆價格時，優先取 `Allocation` 最大者，若相同再取 `Start Date` 較新的，仍相同則取檔案中較前面的第一筆。
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補前版金額時可自動重算。
 - 程式每次會多輸出 `next_time_excess_report.xlsx`。若下次執行時 input 資料夾內有檔名包含 `next_time` 的 Excel，程式會將它視為上一版來源，用第一個 `Excess TotalAMT` 區間帶入 `Previous Excess Total AMT`，並輸出 `Improve` 公式；若找不到上一版來源，終端機會顯示 `找不到上一版來源，不輸出improve資訊`，且 `Improve` 維持空白。
+- RAKEN 會依 `PartNo1` 配對上一版；若主料號順序改變，再以完整替代料群組配對。`MODEL`、第一段可手動輸入的 `PO外備料 QTY`、`reason&action`、`Vendor` 會一起承接到兩份輸出，包含使用者刻意清空的儲存格；新料號維持本期原有資料。上一版有重複主料號或重複群組時會停止並提示，避免不明確的資料配對。
+- 上一版支援舊版與新版備料欄名，並自動辨識實際表頭列；輸出維持兩列表頭，不複製操作說明列。人工欄位若使用公式，會承接 Excel 儲存的計算結果；匯入前須先在 Excel 重算並儲存。
+- RAKEN 會先承接 `MODEL`，再用上一版 `Customer` sheet 的 `MODEL`、`Customer` 欄查表，取代本期 `Customer客户`。先完整比對 MODEL；找不到時，以 `/` 拆分多機種，全部查到才將客戶去重並以 `/` 合併。MODEL 空白、查不到、部分查不到或同機種有衝突對應時，保留本期 Item 來源的 Customer，終端機會顯示筆數及部分範例。
+- RAKEN 兩份輸出都會保留 Customer 對照表資料；沒有上一版 Customer sheet 時，建立只有 `MODEL`、`Customer` 表頭的空白 Customer sheet，供後續維護。AVTC 不套用人工欄位承接與 Customer 查表。
 - 數量與金額運算結果會四捨五入到整數輸出；`Price（USD)` 保留兩位小數。
 - 輸出會預設隱藏 `Overshortage1` 到 `OvershortageN`、各時間區間的 `WO 外demand1` 到 `WO 外demandN`、以及 `Open po1` 到 `Open poN` 細項欄，保留總欄位顯示。
-- RAKEN 每段 Excess 欄位順序為 `Excess POQty`、`Excess POAmount`、`Excess stockQTY`、`Excess stockAmount`、`Excess TotalAMT`；`Excess TotalAMT` 會加總 `Excess POAmount`、`Excess stockAmount`、`PO外備料AMT`。
+- RAKEN 每段 Excess 欄位順序為 `Excess POQty`、`Excess POAmount`、`Excess stockQTY`、`Excess stockAmount`、`Excess TotalAMT`；`Excess TotalAMT` 會加總 `Excess POAmount`、`Excess stockAmount`、`Excess  PO外備料AMT`。`reason&action`、`Vendor` 整欄會依此順序放在第一段 Excess 之後、第二段備料欄位之前。
 - AVTC 每段 Excess 欄位順序為 `Excess stockQTY`、`Excess stockAmount`、`Excess POQty`、`Excess POAmount`、`Excess TotalAMT`；`Excess TotalAMT` 會加總 `Excess POAmount` 與 `Excess stockAmount`，且每段 Excess 標題會使用不同底色。
-- RAKEN 輸出會在第一個 Excess 區塊前插入 `others demand`，並在每個 Excess 區塊前插入 `PO外備料`、`PO外備料QTY`、`PO外備料AMT`。其中 `others demand` 與 `PO外備料` 由使用者填寫，`PO外備料QTY` 與 `PO外備料AMT` 由公式計算。
+- RAKEN 輸出會在第一個 Excess 區塊前插入 `others demand`，並在每個 Excess 區塊前插入 `PO外備料 QTY`、`Excess PO外備料QTY`、`Excess  PO外備料AMT`。其中 `others demand` 與第一段 `PO外備料 QTY` 由使用者填寫；後續各段 `PO外備料 QTY` 以公式引用第一段，請只修改第一段。各段 Excess 備料數量與金額仍依該段需求重新計算。
 - AVTC 不輸出 `others demand`、`PO外備料`、`PO外備料QTY`、`PO外備料AMT`，並會在 `Riskbuy` 與第一段 Excess 中間保留兩個空白欄。
 - RAKEN 每段 `Excess stockQTY` 會扣除該時間區間的 `WO外demand`，並再扣除 `others demand`；AVTC 每段 `Excess stockQTY` 只扣除該時間區間的 `WO外demand`。
 - 輸出的 Excel 會套用 `Microsoft YaHei` 9 號字體，標題會依資料區域套用不同底色，數值欄負數會以紅色顯示。

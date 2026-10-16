@@ -7,6 +7,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from excess_builder import PreviousExcessTotals
+from report_history import CustomerLookup, PreviousExcessInputs
 
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
@@ -17,6 +18,8 @@ NEXT_TIME_KEYWORD = "next_time"
 class PreviousExcessSource:
     path: Path
     totals: PreviousExcessTotals
+    inputs: PreviousExcessInputs | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class _PreviousColumns:
     open_po_details: tuple[int, ...]
     other_demand: int | None
     po_outside_stock: int | None
+    input_columns: dict[str, int]
 
 
 def find_previous_excess_report(input_dir: Path) -> Path | None:
@@ -51,27 +55,70 @@ def load_previous_excess_source(
     customer: str | None = None,
 ) -> PreviousExcessSource:
     workbook = load_workbook(path, data_only=False, read_only=True)
+    cached_workbook = None
     try:
         worksheet = workbook["Excess"] if "Excess" in workbook.sheetnames else workbook.active
-        headers = next(
-            worksheet.iter_rows(min_row=2, max_row=2, values_only=True),
-            (),
-        )
+        header_row, headers = _find_header_row(worksheet)
         columns = _detect_previous_columns(headers)
+        include_inputs = _include_excess_input_columns(customer, columns)
+        cached_workbook = load_workbook(path, data_only=True, read_only=True)
+        cached_worksheet = cached_workbook[worksheet.title]
         totals_by_part: dict[str, float] = {}
         totals_by_group: dict[tuple[str, ...], float] = {}
+        values_by_part: dict[str, dict[str, Any]] = {}
+        values_by_group: dict[tuple[str, ...], dict[str, Any]] = {}
+        value_columns = {
+            columns.price, *columns.overshortage_details,
+            *columns.first_demand_details, *columns.open_po_details,
+        }
+        if include_inputs:
+            value_columns.update(columns.input_columns.values())
+            if columns.other_demand is not None:
+                value_columns.add(columns.other_demand)
 
-        for row in worksheet.iter_rows(min_row=3, values_only=True):
-            parts = _row_parts(row, columns.part_columns)
+        for row_number, (raw_row, cached_row) in enumerate(zip(
+            worksheet.iter_rows(min_row=header_row + 1, values_only=True),
+            cached_worksheet.iter_rows(min_row=header_row + 1, values_only=True),
+        ), start=header_row + 1):
+            parts = _row_parts(raw_row, columns.part_columns)
             if not parts:
                 continue
+            row = list(raw_row)
+            # Carry formula results, never references to the previous workbook's rows.
+            for column in value_columns:
+                value = _cell(raw_row, column)
+                if isinstance(value, str) and value.startswith("="):
+                    cached_value = _cell(cached_row, column)
+                    if cached_value is None:
+                        raise ValueError(
+                            f"Previous Excess row {row_number}, column {column} has an uncached formula; "
+                            "please recalculate and save it in Excel before importing"
+                        )
+                    row[column - 1] = cached_value
+            group = tuple(sorted(set(parts)))
+            if include_inputs and (parts[0] in totals_by_part or group in totals_by_group):
+                raise ValueError(f"Ambiguous previous Excess match at row {row_number}: {parts[0]}")
             total = _previous_total_amount(
                 row,
                 columns,
-                include_excess_input_columns=_include_excess_input_columns(customer, columns),
+                include_excess_input_columns=include_inputs,
             )
             totals_by_part.setdefault(parts[0], total)
-            totals_by_group.setdefault(tuple(sorted(set(parts))), total)
+            totals_by_group.setdefault(group, total)
+            if include_inputs:
+                values = {header: _cell(row, column) for header, column in columns.input_columns.items()}
+                values_by_part[parts[0]] = values
+                values_by_group[group] = values
+
+        customer_lookup = None
+        warnings: list[str] = []
+        if include_inputs:
+            if "Customer" in cached_workbook.sheetnames:
+                customer_lookup = CustomerLookup.from_rows(tuple(
+                    cached_workbook["Customer"].iter_rows(values_only=True)
+                ))
+            else:
+                warnings.append("上一版沒有 Customer sheet，保留本期原有 Customer 資訊。")
 
         return PreviousExcessSource(
             path=path,
@@ -79,9 +126,20 @@ def load_previous_excess_source(
                 totals_by_part=totals_by_part,
                 totals_by_group=totals_by_group,
             ),
+            inputs=PreviousExcessInputs(values_by_part, values_by_group, customer_lookup) if include_inputs else None,
+            warnings=tuple(warnings),
         )
     finally:
         workbook.close()
+        if cached_workbook is not None:
+            cached_workbook.close()
+
+
+def _find_header_row(worksheet: Any) -> tuple[int, tuple[Any, ...]]:
+    for number, row in enumerate(worksheet.iter_rows(min_row=1, max_row=20, values_only=True), 1):
+        if any(_base_header(value) == "PartNo1" for value in row):
+            return number, row
+    raise ValueError("Cannot find previous Excess header row containing PartNo1")
 
 
 def _detect_previous_columns(headers: tuple[Any, ...]) -> _PreviousColumns:
@@ -93,6 +151,20 @@ def _detect_previous_columns(headers: tuple[Any, ...]) -> _PreviousColumns:
         if base.startswith("PartNo") or base.startswith("替代料")
     )
     first_demand_total = _require_base_column(bases, "WO外demand")
+    # In the old layout PO外備料QTY was computed. Prefer the old raw input
+    # PO外備料 when present, otherwise use the newly named PO外備料 QTY.
+    po_outside_stock = (
+        _optional_base_column(bases, "PO外備料")
+        or _optional_base_column(bases, "PO外備料 QTY")
+    )
+    input_columns = {
+        header: column
+        for header in ("MODEL", "reason&action", "Vendor")
+        for column in [_optional_base_column(bases, header)]
+        if column is not None
+    }
+    if po_outside_stock is not None:
+        input_columns["PO外備料 QTY"] = po_outside_stock
 
     return _PreviousColumns(
         part_columns=part_columns,
@@ -109,7 +181,8 @@ def _detect_previous_columns(headers: tuple[Any, ...]) -> _PreviousColumns:
             if base.startswith("Open po")
         ),
         other_demand=_optional_base_column(bases, "others demand"),
-        po_outside_stock=_optional_base_column(bases, "PO外備料"),
+        po_outside_stock=po_outside_stock,
+        input_columns=input_columns,
     )
 
 
@@ -204,7 +277,7 @@ def _require_base_column(bases: list[str], base_header: str) -> int:
 
 def _optional_base_column(bases: list[str], base_header: str) -> int | None:
     for index, base in enumerate(bases, start=1):
-        if base == base_header:
+        if "".join(base.split()) == "".join(base_header.split()):
             return index
     return None
 
@@ -215,7 +288,7 @@ def _base_header(header: Any) -> str:
     parts = str(header).split("\n")
     if parts[0] == "Excess" and len(parts) >= 2:
         return "\n".join(parts[:2])
-    return parts[0]
+    return parts[0].strip()
 
 
 def _number(value: Any) -> float:

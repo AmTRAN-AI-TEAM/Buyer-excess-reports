@@ -83,6 +83,16 @@ class Progress:
         else:
             print(message)
 
+    def warnings(self, messages: Sequence[str]) -> None:
+        if not messages:
+            return
+        separator = "＝" * 40
+        self.message("\n".join([
+            "", separator,
+            *(f"⚠️ {message}" for message in messages),
+            separator, "",
+        ]))
+
     def __exit__(self, exc_type, exc, tb) -> None:
         if exc_type is None:
             self.finish()
@@ -170,14 +180,18 @@ def generate_report(
         shortage_records = load_shortage_records(shortage_source)
 
         progress.step("Read previous Excess data")
+        previous_source = None
+        warning_messages: list[str] = []
         if previous_report_file is None:
             previous_excess_totals = None
-            progress.message("找不到上一版來源，不輸出improve資訊")
+            warning_messages.append("找不到上一版來源，不輸出improve資訊")
         else:
-            previous_excess_totals = load_previous_excess_source(
+            previous_source = load_previous_excess_source(
                 previous_report_file,
                 customer=customer_code,
-            ).totals
+            )
+            previous_excess_totals = previous_source.totals
+            warning_messages.extend(previous_source.warnings)
 
         progress.step("Build Excess rows")
         include_excess_input_columns = customer_code == "RAKEN"
@@ -187,8 +201,10 @@ def generate_report(
             item_data,
             include_excess_input_columns=include_excess_input_columns,
             previous_excess_totals=previous_excess_totals,
+            previous_excess_inputs=previous_source.inputs if previous_source else None,
             customer=customer_code,
         )
+        progress.warnings([*warning_messages, *result.warnings])
 
         progress.step("Write Excel files")
         write_excess_workbook(
@@ -198,6 +214,11 @@ def generate_report(
             result.row2_headers,
             result.part_column_count,
             customer=customer_code,
+            customer_sheet_rows=(
+                previous_source.inputs.customer_lookup.sheet_rows
+                if previous_source and previous_source.inputs and previous_source.inputs.customer_lookup
+                else None
+            ),
         )
         next_time_output_file = output_file.with_name(NEXT_TIME_EXCESS_REPORT_NAME)
         if output_file.resolve() != next_time_output_file.resolve():

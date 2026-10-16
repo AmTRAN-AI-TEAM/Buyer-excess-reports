@@ -45,6 +45,7 @@ def write_excess_workbook(
     part_column_count: int,
     *,
     customer: str | None = None,
+    customer_sheet_rows: tuple[tuple[Any, ...], ...] | None = None,
 ) -> None:
     _validate_workbook_shape(rows, row1_headers, row2_headers)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +66,15 @@ def write_excess_workbook(
         part_column_count,
         customer=customer,
     )
+    if customer and customer.upper() == "RAKEN":
+        customer_sheet = workbook.create_sheet("Customer")
+        for row in customer_sheet_rows or (("MODEL", "Customer"),):
+            customer_sheet.append(row)
+        for row in customer_sheet:
+            for cell in row:
+                cell.font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
+        customer_sheet.column_dimensions["A"].width = 30
+        customer_sheet.column_dimensions["B"].width = 24
     workbook.save(output_file)
 
 
@@ -183,9 +193,9 @@ def _apply_layout(
         "Previous Excess Total AMT": 18,
         "是否呆": 12,
         "others demand": 14,
-        "PO外備料": 14,
-        "PO外備料QTY": 14,
-        "PO外備料AMT": 14,
+        "PO外備料 QTY": 14,
+        "Excess PO外備料QTY": 18,
+        "Excess  PO外備料AMT": 18,
     }
 
     for column in range(1, last_column + 1):
@@ -360,7 +370,7 @@ def _header_region(header: Any) -> str:
         return "demand"
     if base_header == "Openpo" or base_header.startswith("Open po") or base_header == "Riskbuy":
         return "supply"
-    if base_header in {"others demand", "PO外備料", "PO外備料QTY", "PO外備料AMT"}:
+    if base_header in {"others demand", "PO外備料 QTY", "Excess PO外備料QTY", "Excess  PO外備料AMT"}:
         return "input"
     if base_header in EXCESS_HEADER_SET:
         return "excess"
@@ -397,9 +407,9 @@ def _is_numeric_header(header: Any) -> bool:
             "Openpo",
             "Riskbuy",
             "others demand",
-            "PO外備料",
-            "PO外備料QTY",
-            "PO外備料AMT",
+            "PO外備料 QTY",
+            "Excess PO外備料QTY",
+            "Excess  PO外備料AMT",
             "Excess\nstockQTY",
             "Excess\nstockAmount",
             "Excess\nPOQty",
