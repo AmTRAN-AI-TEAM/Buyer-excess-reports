@@ -174,6 +174,7 @@ def generate_report(
             item_file,
             price_path=price_file,
             price_headers=profile.price_headers if profile else ("Uprice",),
+            preferred_cost_sheet=profile.preferred_cost_sheet if profile else None,
         )
 
         progress.step("Read shortage data")

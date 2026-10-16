@@ -8,10 +8,11 @@ class CustomerProfile:
     code: str
     separate_price_file: bool = False
     price_headers: tuple[str, ...] = ("Uprice",)
+    preferred_cost_sheet: str | None = None
 
 
 CUSTOMER_PROFILES = {
-    "AVTC": CustomerProfile(code="AVTC"),
+    "AVTC": CustomerProfile(code="AVTC", preferred_cost_sheet="成本价"),
     "RAKEN": CustomerProfile(
         code="RAKEN",
         separate_price_file=True,

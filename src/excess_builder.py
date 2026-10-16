@@ -135,7 +135,8 @@ def build_excess_rows(
 ) -> ExcessBuildResult:
     item_data = item_data or ItemWorkbookData(metadata_by_part={}, prices_by_part={})
     layout = _layout_for_customer(customer, include_excess_input_columns)
-    carry_inputs = previous_excess_inputs if customer and customer.upper() == "RAKEN" else None
+    customer_code = customer.upper() if customer else None
+    carry_inputs = previous_excess_inputs if customer_code in {"RAKEN", "AVTC"} else None
     lookup_warnings: Counter[str] = Counter()
     warning_examples: dict[str, list[str]] = defaultdict(list)
     demand_labels = _demand_labels(shortage_records)
@@ -190,9 +191,13 @@ def build_excess_rows(
             active_parts=active_parts,
         ) or item_data.model_summary(displayed_parts)
         model_remark = alternates.model_remark_summary(displayed_parts)
-        carried_values = carry_inputs.values_for(displayed_parts) if carry_inputs else {}
+        previous_values = carry_inputs.values_for(displayed_parts) if carry_inputs else {}
+        carried_values = {
+            header: value for header, value in previous_values.items()
+            if customer_code == "RAKEN" or header in {"reason&action", "Vendor"}
+        }
         model = carried_values.get("MODEL", model)
-        if carry_inputs and carry_inputs.customer_lookup is not None:
+        if customer_code == "RAKEN" and carry_inputs and carry_inputs.customer_lookup is not None:
             mapped_customer, issue = carry_inputs.customer_lookup.resolve(model)
             if issue is None:
                 customer_summary = mapped_customer

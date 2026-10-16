@@ -60,7 +60,12 @@ def load_previous_excess_source(
         worksheet = workbook["Excess"] if "Excess" in workbook.sheetnames else workbook.active
         header_row, headers = _find_header_row(worksheet)
         columns = _detect_previous_columns(headers)
-        include_inputs = _include_excess_input_columns(customer, columns)
+        include_excess_inputs = _include_excess_input_columns(customer, columns)
+        carry_previous_inputs = include_excess_inputs or bool(customer and customer.upper() == "AVTC")
+        input_columns = {
+            header: column for header, column in columns.input_columns.items()
+            if include_excess_inputs or header in {"reason&action", "Vendor"}
+        } if carry_previous_inputs else {}
         cached_workbook = load_workbook(path, data_only=True, read_only=True)
         cached_worksheet = cached_workbook[worksheet.title]
         totals_by_part: dict[str, float] = {}
@@ -71,8 +76,8 @@ def load_previous_excess_source(
             columns.price, *columns.overshortage_details,
             *columns.first_demand_details, *columns.open_po_details,
         }
-        if include_inputs:
-            value_columns.update(columns.input_columns.values())
+        value_columns.update(input_columns.values())
+        if include_excess_inputs:
             if columns.other_demand is not None:
                 value_columns.add(columns.other_demand)
 
@@ -96,23 +101,23 @@ def load_previous_excess_source(
                         )
                     row[column - 1] = cached_value
             group = tuple(sorted(set(parts)))
-            if include_inputs and (parts[0] in totals_by_part or group in totals_by_group):
+            if carry_previous_inputs and (parts[0] in totals_by_part or group in totals_by_group):
                 raise ValueError(f"Ambiguous previous Excess match at row {row_number}: {parts[0]}")
             total = _previous_total_amount(
                 row,
                 columns,
-                include_excess_input_columns=include_inputs,
+                include_excess_input_columns=include_excess_inputs,
             )
             totals_by_part.setdefault(parts[0], total)
             totals_by_group.setdefault(group, total)
-            if include_inputs:
-                values = {header: _cell(row, column) for header, column in columns.input_columns.items()}
+            if carry_previous_inputs:
+                values = {header: _cell(row, column) for header, column in input_columns.items()}
                 values_by_part[parts[0]] = values
                 values_by_group[group] = values
 
         customer_lookup = None
         warnings: list[str] = []
-        if include_inputs:
+        if include_excess_inputs:
             if "Customer" in cached_workbook.sheetnames:
                 customer_lookup = CustomerLookup.from_rows(tuple(
                     cached_workbook["Customer"].iter_rows(values_only=True)
@@ -126,7 +131,7 @@ def load_previous_excess_source(
                 totals_by_part=totals_by_part,
                 totals_by_group=totals_by_group,
             ),
-            inputs=PreviousExcessInputs(values_by_part, values_by_group, customer_lookup) if include_inputs else None,
+            inputs=PreviousExcessInputs(values_by_part, values_by_group, customer_lookup) if carry_previous_inputs else None,
             warnings=tuple(warnings),
         )
     finally:

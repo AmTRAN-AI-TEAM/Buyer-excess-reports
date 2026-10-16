@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -287,22 +288,41 @@ def load_item_workbook_data(
     *,
     price_path: Path | None = None,
     price_headers: tuple[str, ...] = ("Uprice",),
+    preferred_cost_sheet: str | None = None,
 ) -> ItemWorkbookData:
     workbook = load_workbook(item_path, read_only=True, data_only=True)
     try:
         item_sheet = _find_item_sheet(workbook)
         metadata = _load_item_metadata(workbook[item_sheet])
+        preferred_prices: dict[str, float] = {}
+        cost_sheet = _find_sheet_or_none(workbook.sheetnames, preferred_cost_sheet) if preferred_cost_sheet else None
+        if cost_sheet is not None:
+            preferred_prices = {
+                part: price
+                for part, price in _load_prices(
+                    workbook[cost_sheet], ("US Unit Cost",), part_headers=("Item",),
+                ).items()
+                if isfinite(price)
+            }
     finally:
         workbook.close()
 
     price_workbook_path = price_path or item_path
     price_workbook = load_workbook(price_workbook_path, read_only=True, data_only=True)
     try:
-        price_sheet = _find_price_sheet(price_workbook, price_headers)
-        prices = _load_prices(price_workbook[price_sheet], price_headers)
+        try:
+            price_sheet = _find_price_sheet(price_workbook, price_headers)
+        except ValueError:
+            if not preferred_prices:
+                raise
+            prices = {}
+        else:
+            prices = _load_prices(price_workbook[price_sheet], price_headers)
     finally:
         price_workbook.close()
 
+    # A numeric zero is a valid cost and must override the fallback price too.
+    prices.update(preferred_prices)
     return ItemWorkbookData(metadata_by_part=metadata, prices_by_part=prices)
 
 
@@ -434,10 +454,12 @@ def _load_item_metadata(worksheet: Worksheet) -> dict[str, ItemMetadata]:
 def _load_prices(
     worksheet: Worksheet,
     price_headers: tuple[str, ...],
+    *,
+    part_headers: tuple[str, ...] = PART_NO_HEADERS,
 ) -> dict[str, float]:
     header_row_number = _find_table_header_row(
         worksheet,
-        (PART_NO_HEADERS, price_headers),
+        (part_headers, price_headers),
     )
     if header_row_number is None:
         return {}
@@ -445,7 +467,7 @@ def _load_prices(
     rows = worksheet.iter_rows(min_row=header_row_number, values_only=True)
     header_row = next(rows)
     headers = _header_map(header_row)
-    part_no_column = _require_header(headers, *PART_NO_HEADERS)
+    part_no_column = _require_header(headers, *part_headers)
     uprice_column = _require_header(headers, *price_headers)
     allocation_column = _optional_header(headers, "Allocation")
     start_date_column = _optional_header(headers, "Start Date")
