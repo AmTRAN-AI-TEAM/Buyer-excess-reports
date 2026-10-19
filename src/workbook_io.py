@@ -294,6 +294,7 @@ def load_item_workbook_data(
     price_path: Path | None = None,
     price_headers: tuple[str, ...] = ("Uprice",),
     preferred_cost_sheet: str | None = None,
+    fallback_to_first_price_sheet: bool = False,
 ) -> ItemWorkbookData:
     with file_context(item_path, "讀取 Item 資料"):
         workbook = load_workbook(item_path, read_only=True, data_only=True)
@@ -319,15 +320,20 @@ def load_item_workbook_data(
     with file_context(price_workbook_path, "讀取 Price 資料"):
         price_workbook = load_workbook(price_workbook_path, read_only=True, data_only=True)
         try:
-            try:
-                price_sheet = _find_price_sheet(price_workbook, price_headers)
-            except ValueError:
-                if not preferred_prices:
-                    raise
-                prices = {}
+            if fallback_to_first_price_sheet:
+                prices = _load_prices_with_sheet_fallback(
+                    price_workbook, price_workbook_path, price_headers,
+                )
             else:
-                with file_context(price_workbook_path, "讀取 Price 資料", price_sheet):
-                    prices = _load_prices(price_workbook[price_sheet], price_headers)
+                try:
+                    price_sheet = _find_price_sheet(price_workbook, price_headers)
+                except ValueError:
+                    if not preferred_prices:
+                        raise
+                    prices = {}
+                else:
+                    with file_context(price_workbook_path, "讀取 Price 資料", price_sheet):
+                        prices = _load_prices(price_workbook[price_sheet], price_headers)
         finally:
             price_workbook.close()
 
@@ -466,12 +472,16 @@ def _load_prices(
     price_headers: tuple[str, ...],
     *,
     part_headers: tuple[str, ...] = PART_NO_HEADERS,
+    require_headers: bool = False,
+    finite_only: bool = False,
 ) -> dict[str, float]:
     header_row_number = _find_table_header_row(
         worksheet,
         (part_headers, price_headers),
     )
     if header_row_number is None:
+        if require_headers:
+            raise ValueError("Cannot identify the price header row")
         return {}
 
     rows = worksheet.iter_rows(min_row=header_row_number, values_only=True)
@@ -486,7 +496,7 @@ def _load_prices(
     for row_number, row in enumerate(rows, start=header_row_number + 1):
         part_no = _text_or_none(_cell_by_index(row, part_no_column))
         price = _number_or_none(_cell_by_index(row, uprice_column))
-        if not part_no or price is None:
+        if not part_no or price is None or (finite_only and not isfinite(price)):
             continue
 
         candidate = PriceCandidate(
@@ -500,6 +510,35 @@ def _load_prices(
             candidates[part_no] = candidate
 
     return {part_no: candidate.price for part_no, candidate in candidates.items()}
+
+
+def _load_prices_with_sheet_fallback(
+    workbook: Any,
+    workbook_path: Path,
+    price_headers: tuple[str, ...],
+) -> dict[str, float]:
+    """Prefer Price, then fill missing parts from the first other tab."""
+    primary_sheet = _find_sheet_or_none(workbook.sheetnames, "Price")
+    fallback_sheet = next(
+        (name for name in workbook.sheetnames if name != primary_sheet),
+        None,
+    )
+    prices: dict[str, float] = {}
+    for sheet_name in (primary_sheet, fallback_sheet):
+        if sheet_name is None:
+            continue
+        with file_context(workbook_path, "讀取 Price 資料", sheet_name):
+            sheet_prices = _load_prices(
+                workbook[sheet_name],
+                ("平均值项:US Unit Cost", *price_headers),
+                part_headers=("行标签", *PART_NO_HEADERS),
+                require_headers=True,
+                finite_only=True,
+            )
+        # Membership, rather than truthiness, preserves a valid zero price.
+        for part_no, price in sheet_prices.items():
+            prices.setdefault(part_no, price)
+    return prices
 
 
 def _find_item_sheet(workbook: Any) -> str:

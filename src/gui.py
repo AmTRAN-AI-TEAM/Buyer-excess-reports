@@ -55,7 +55,7 @@ PHASE_LABELS = {
 }
 REQUIRED_FILES = {
     "AVTC": ("Shortage", "BOM", "Item", "next_time_excess_report"),
-    "RAKEN": ("Shortage", "BOM", "item information", "Price RKN", "next_time_excess_report"),
+    "RAKEN": ("Shortage", "BOM", "item information", "Price", "next_time_excess_report"),
 }
 
 

@@ -9,6 +9,7 @@ class CustomerProfile:
     separate_price_file: bool = False
     price_headers: tuple[str, ...] = ("Uprice",)
     preferred_cost_sheet: str | None = None
+    fallback_to_first_price_sheet: bool = False
 
 
 CUSTOMER_PROFILES = {
@@ -17,6 +18,7 @@ CUSTOMER_PROFILES = {
         code="RAKEN",
         separate_price_file=True,
         price_headers=("USD",),
+        fallback_to_first_price_sheet=True,
     ),
 }
 

@@ -71,6 +71,11 @@ def explain_error(error: Exception) -> tuple[str, str]:
         return f"找到多份上一版報表：{text.split(':', 1)[1].strip()}", "請只保留一份檔名包含 next_time 的上一版報表。"
     if text == "Cannot identify the shortage header row":
         return "無法辨識 Shortage 的表頭。", "請確認前 30 列內包含料號與必要欄位。"
+    if text == "Cannot identify the price header row":
+        return (
+            "前 30 列內找不到必要的料號欄與價格欄。",
+            "請確認分頁順序與表頭；支援「行标签／平均值项:US Unit Cost」或「Part No.／USD」。",
+        )
     if text.startswith("Cannot find required sheet "):
         return f"找不到必要工作表「{text.removeprefix('Cannot find required sheet ')}」。", "請確認放入的是正確的來源檔案。"
     if text.startswith("Cannot find required ") and text.endswith(" sheet"):
