@@ -165,10 +165,10 @@ def find_price_file(input_dir: Path) -> Path:
     raise ValueError(f"Found multiple Price Excel files: {names}")
 
 
-def find_shortage_source(input_dir: Path, bom_file: Path) -> ShortageSource:
+def find_shortage_source(input_dir: Path, bom_file: Path | None) -> ShortageSource:
     matches: list[ShortageSource] = []
     for workbook_path in excel_files(input_dir):
-        if workbook_path.resolve() == bom_file.resolve():
+        if bom_file is not None and workbook_path.resolve() == bom_file.resolve():
             continue
 
         with file_context(workbook_path, "檢查 Excel 的 Shortage 工作表"):

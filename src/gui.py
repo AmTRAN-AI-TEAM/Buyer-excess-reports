@@ -11,7 +11,6 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from time import monotonic
 from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Callable
@@ -19,10 +18,9 @@ from typing import Callable
 from PIL import Image, ImageTk
 
 from report_errors import ReportError
-from progress_timing import RemainingTimeEstimator, TimingHistory
+from source_check import SourceCheck, check_sources, input_signature, source_requirements
 from runner import (
     CUSTOMERS,
-    PROGRESS_LABELS,
     PROGRESS_STEPS,
     ProgressEvent,
     RunResult,
@@ -35,10 +33,14 @@ from runner import (
 
 APP_TITLE = "Excess報表整理器"
 BACKGROUND = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "assets" / "app_background.png"
-WHITE = "#f2f8ff"
-MUTED = "#a7c9eb"
-CYAN = "#55ddff"
-PANEL = "#071b3e"
+INK = "#422715"
+MUTED = "#6b452b"
+ACCENT = "#704016"
+PANEL = "#fff2db"
+LIGHT = "#fff7e8"
+SUCCESS = "#28613b"
+ERROR = "#9b2727"
+WARNING = "#a86312"
 PHASE_LABELS = {
     "Find BOM": "尋找 BOM 檔案",
     "Find Item workbook": "尋找 Item／Price 檔案",
@@ -52,10 +54,6 @@ PHASE_LABELS = {
     "Write Excel files": "寫入 Excess 與 next_time 報表",
     "Write incomplete alternates file": "寫入不完全替代料明細",
     "Done": "所有報表已完成",
-}
-REQUIRED_FILES = {
-    "AVTC": ("Shortage", "BOM", "Item", "next_time_excess_report"),
-    "RAKEN": ("Shortage", "BOM", "item information", "Price", "next_time_excess_report"),
 }
 
 
@@ -80,7 +78,7 @@ def open_folder(path: Path) -> None:
 
 
 class ActionButton(tk.Canvas):
-    """A keyboard-accessible button matching the supplied blue artwork."""
+    """A keyboard-accessible button with a real disabled state."""
 
     def __init__(
         self,
@@ -93,6 +91,7 @@ class ActionButton(tk.Canvas):
         font: tuple,
         primary: bool = True,
         background: str = PANEL,
+        backdrop: ImageTk.PhotoImage | None = None,
     ) -> None:
         super().__init__(
             parent, width=width, height=height, bg=background,
@@ -101,6 +100,8 @@ class ActionButton(tk.Canvas):
         self.command = command
         self.label = text
         self.primary = primary
+        self.enabled = True
+        self.backdrop = backdrop
         self.hovered = False
         self.pressed = False
         self.button_font = font
@@ -118,12 +119,17 @@ class ActionButton(tk.Canvas):
 
     def _draw(self) -> None:
         self.delete("all")
+        if self.backdrop is not None:
+            self.create_image(0, 0, image=self.backdrop, anchor="nw")
         width, height = self.button_width, self.button_height
         radius = min(12, height // 4)
-        fill = ("#229aff" if self.hovered else "#147fe3") if self.primary else ("#123e73" if self.hovered else "#0b2c58")
+        fill = ("#865024" if self.hovered else "#683c1c") if self.primary else ("#f5d7a6" if self.hovered else "#edc58d")
         if self.pressed:
-            fill = "#0866bd" if self.primary else "#071f43"
-        outline = CYAN if self.hovered or self.focus_get() is self else "#329fe7"
+            fill = "#482610" if self.primary else "#d9ac70"
+        outline = "#e2b96d" if self.hovered or self.focus_get() is self else "#a36c32"
+        text_color = LIGHT if self.primary else INK
+        if not self.enabled:
+            fill, outline, text_color = "#b8afa0", "#958c80", "#615b53"
         points = [
             radius, 2, width - radius, 2, width - 2, 2, width - 2, radius,
             width - 2, height - radius, width - 2, height - 2,
@@ -131,10 +137,17 @@ class ActionButton(tk.Canvas):
             2, height - radius, 2, radius, 2, 2,
         ]
         self.create_polygon(points, smooth=True, fill=fill, outline=outline, width=2)
-        self.create_text(width / 2, height / 2, text=self.label, fill=WHITE, font=self.button_font)
+        self.create_text(width / 2, height / 2, text=self.label, fill=text_color, font=self.button_font)
+
+    def set_state(self, text: str, *, enabled: bool) -> None:
+        self.label = text
+        self.enabled = enabled
+        self.hovered = self.pressed = False
+        self.configure(cursor="hand2" if enabled else "arrow", takefocus=enabled)
+        self._draw()
 
     def _hover(self, value: bool) -> None:
-        self.hovered = value
+        self.hovered = value and self.enabled
         self._draw()
 
     def _leave(self, _event) -> None:
@@ -142,6 +155,8 @@ class ActionButton(tk.Canvas):
         self._hover(False)
 
     def _press(self, _event) -> None:
+        if not self.enabled:
+            return
         self.focus_set()
         self.pressed = True
         self._draw()
@@ -158,16 +173,17 @@ class ActionButton(tk.Canvas):
         return "break"
 
     def invoke(self) -> None:
-        self.command()
+        if self.enabled:
+            self.command()
 
 
 class AppDialog(tk.Toplevel):
-    def __init__(self, app: "ExcessApp", title: str, *, kind: str, width: int = 650) -> None:
+    def __init__(self, app: "ExcessApp", title: str, *, kind: str, width: int = 760) -> None:
         super().__init__(app.root)
         self.app = app
         self.kind = kind
         self.title(title)
-        self.configure(bg="#25669e")
+        self.configure(bg="#a36c32")
         self.resizable(False, False)
         self.transient(app.root)
         self.body = tk.Frame(self, bg=PANEL, padx=app.px(28), pady=app.px(24))
@@ -176,9 +192,8 @@ class AppDialog(tk.Toplevel):
         self.content_width = app.px(width - 60)
         self.width = app.px(width)
         self.primary_button: ActionButton | None = None
-        self.secondary_button: ActionButton | None = None
 
-    def label(self, text: str, *, size: int = 15, color: str = WHITE, bold: bool = False, pady=(0, 10)) -> tk.Label:
+    def label(self, text: str, *, size: int = 20, color: str = INK, bold: bool = False, pady=(0, 12)) -> tk.Label:
         widget = tk.Label(
             self.body, text=text, bg=PANEL, fg=color, font=self.app.font(size, bold),
             anchor="w", justify="left", wraplength=self.content_width,
@@ -186,20 +201,14 @@ class AppDialog(tk.Toplevel):
         widget.pack(fill="x", pady=tuple(self.app.px(value) for value in pady))
         return widget
 
-    def buttons(self, primary_text: str, command: Callable[[], None], *, secondary_text: str | None = None, secondary_command: Callable[[], None] | None = None) -> None:
+    def buttons(self, primary_text: str, command: Callable[[], None]) -> None:
         row = tk.Frame(self.body, bg=PANEL)
         row.pack(fill="x", pady=(self.app.px(18), 0))
         self.primary_button = ActionButton(
-            row, primary_text, command, width=self.app.px(150), height=self.app.px(46),
-            font=self.app.font(15, True),
+            row, primary_text, command, width=self.app.px(240), height=self.app.px(58),
+            font=self.app.font(21, True),
         )
-        self.primary_button.pack(side="right")
-        if secondary_text is not None and secondary_command is not None:
-            self.secondary_button = ActionButton(
-                row, secondary_text, secondary_command, width=self.app.px(300), height=self.app.px(46),
-                font=self.app.font(14), primary=False,
-            )
-            self.secondary_button.pack(side="left", padx=(0, self.app.px(12)))
+        self.primary_button.pack()
 
     def show(self, on_close: Callable[[], None]) -> None:
         self.protocol("WM_DELETE_WINDOW", on_close)
@@ -237,32 +246,34 @@ class ExcessApp:
         self.last_progress: ProgressEvent | None = None
         self.result: RunResult | None = None
         self.worker: threading.Thread | None = None
-        self.time_estimator: RemainingTimeEstimator | None = None
-        self.timing_history = TimingHistory(self.app_root / ".app_state" / "run_timings.json", PROGRESS_LABELS)
-        self._eta_next_update = 0.0
+        self._check_token = 0
+        self._check_busy = False
+        self.source_checks: tuple[SourceCheck, ...] = ()
         families = set(tkfont.families(root))
         self.font_family = next((name for name in ("Microsoft JhengHei UI", "Microsoft JhengHei", "Noto Sans CJK TC", "Arial") if name in families), "TkDefaultFont")
         self.log_font_family = "Consolas" if "Consolas" in families else self.font_family
         with Image.open(BACKGROUND) as source:
             ratio = source.height / source.width
-            self.width = int(min(1200, root.winfo_screenwidth() * 0.92, root.winfo_screenheight() * 0.86 / ratio))
+            self.width = int(min(1440, root.winfo_screenwidth() * 0.92, root.winfo_screenheight() * 0.86 / ratio))
             self.height = round(self.width * ratio)
             self.scale = self.width / 1200
-            self.background = ImageTk.PhotoImage(source.resize((self.width, self.height), Image.Resampling.LANCZOS), master=root)
+            self.background_image = source.resize((self.width, self.height), Image.Resampling.LANCZOS)
+            self.background = ImageTk.PhotoImage(self.background_image, master=root)
         root.title(APP_TITLE)
-        root.configure(bg="#03102d")
+        root.configure(bg=INK)
         root.resizable(False, False)
         x = max(0, (root.winfo_screenwidth() - self.width) // 2)
         y = max(30, (root.winfo_screenheight() - self.height) // 2 - 20)
         root.geometry(f"{self.width}x{self.height}+{x}+{y}")
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.report_callback_exception = self._callback_error
-        self.canvas = tk.Canvas(root, width=self.width, height=self.height, highlightthickness=0, bg="#03102d")
+        self.canvas = tk.Canvas(root, width=self.width, height=self.height, highlightthickness=0, bg=INK)
         self.canvas.pack(fill="both", expand=True)
         style = ttk.Style(root)
         style.theme_use("clam")
-        style.configure("Excess.Horizontal.TProgressbar", troughcolor="#092348", background="#32cfff", bordercolor="#173f72", lightcolor="#32cfff", darkcolor="#32cfff")
-        style.configure("Excess.Vertical.TScrollbar", troughcolor=PANEL, background="#224c7a", bordercolor=PANEL, arrowcolor=MUTED)
+        style.configure("Excess.Horizontal.TProgressbar", troughcolor="#e7c795", background="#875322", bordercolor="#a36c32", lightcolor="#a5753c", darkcolor="#683c1c")
+        style.configure("Excess.Vertical.TScrollbar", troughcolor=PANEL, background="#d9b77e", bordercolor=PANEL, arrowcolor=MUTED)
+        root.bind("<Escape>", self._go_back)
         self.show_welcome()
         self._poll_id = root.after(60, self._poll_events)
 
@@ -272,10 +283,12 @@ class ExcessApp:
     def font(self, size: int, bold: bool = False) -> tuple:
         return (self.font_family, -max(10, self.px(size)), "bold" if bold else "normal")
 
-    def _text(self, x: int, y: int, text: str, *, size: int = 16, color: str = WHITE, bold: bool = False, anchor="center") -> int:
+    def _text(self, x: int, y: int, text: str, *, size: int = 20, color: str = INK, bold: bool = False, anchor="center") -> int:
         return self.canvas.create_text(self.px(x), self.px(y), text=text, fill=color, font=self.font(size, bold), anchor=anchor)
 
     def _reset(self, screen: str) -> None:
+        self._check_token += 1
+        self._check_busy = False
         for widget in self.widgets:
             widget.destroy()
         self.widgets.clear()
@@ -283,10 +296,13 @@ class ExcessApp:
         self.canvas.create_image(0, 0, anchor="nw", image=self.background)
         self.screen = screen
 
-    def _button(self, x: int, y: int, text: str, command: Callable[[], None], *, width=230, height=58, size=20, primary=True) -> ActionButton:
+    def _button(self, x: int, y: int, text: str, command: Callable[[], None], *, width=290, height=74, size=26, primary=True) -> ActionButton:
+        button_width, button_height = self.px(width), self.px(height)
+        left, top = self.px(x) - button_width // 2, self.px(y) - button_height // 2
+        backdrop = ImageTk.PhotoImage(self.background_image.crop((left, top, left + button_width, top + button_height)), master=self.root)
         button = ActionButton(
-            self.canvas, text, command, width=self.px(width), height=self.px(height),
-            font=self.font(size, True), primary=primary, background="#0843a2",
+            self.canvas, text, command, width=button_width, height=button_height,
+            font=self.font(size, True), primary=primary, backdrop=backdrop,
         )
         self.widgets.append(button)
         self.canvas.create_window(self.px(x), self.px(y), window=button)
@@ -294,23 +310,29 @@ class ExcessApp:
 
     def show_welcome(self) -> None:
         self._reset("welcome")
-        self._text(600, 338, "BUYER EXCESS REPORTS", size=14, color=CYAN, bold=True)
-        self._text(600, 401, APP_TITLE, size=46, bold=True)
-        self._text(600, 453, "將來源資料整理成清楚、完整的 Excess 報表", size=18, color=MUTED)
-        self.start_button = self._button(600, 524, "Start  →", self.show_factories, width=250, height=62, size=23)
-        self._text(600, 596, "選擇工廠　・　確認檔案　・　產出報表", size=13, color=MUTED)
+        self._text(600, 350, APP_TITLE, size=56, bold=True)
+        self.start_button = self._button(600, 455, "Start  →", self.show_factories, width=310, height=78, size=29)
+        self._text(600, 550, "選擇工廠　・　確認檔案　・　產出報表", size=18, color=MUTED)
         self.start_button.focus_set()
 
     def show_factories(self) -> None:
         self._reset("factory")
-        self._text(600, 330, "STEP 01  /  選擇工廠", size=14, color=CYAN, bold=True)
-        self._text(600, 383, "請選擇所屬工廠", size=35, bold=True)
-        self._text(600, 426, "選擇後，請依提示確認本次需要的來源檔案", size=17, color=MUTED)
+        self._text(600, 266, "STEP 01  /  選擇工廠", size=18, color=ACCENT, bold=True)
+        self._text(600, 324, "請選擇所屬工廠", size=44, bold=True)
+        self._text(600, 378, "選擇後，將自動檢查本次需要的來源檔案", size=21, color=MUTED)
         self.customer_buttons = {}
-        for x, customer in zip((454, 746), CUSTOMERS):
-            self.customer_buttons[customer] = self._button(x, 501, customer, lambda value=customer: self.choose_customer(value), width=248, height=72, size=26)
-        self._text(600, 566, "AVTC 與 RAKEN 的輸入、輸出資料夾分開存放", size=14, color=MUTED)
-        self._button(147, 612, "← 返回", self.show_welcome, width=110, height=36, size=13, primary=False)
+        for x, customer in zip((435, 765), CUSTOMERS):
+            self.customer_buttons[customer] = self._button(x, 464, customer, lambda value=customer: self.choose_customer(value), width=280, height=86, size=32)
+        self._text(600, 551, "AVTC 與 RAKEN 的輸入、輸出資料夾分開存放", size=18, color=MUTED)
+        self._button(135, 598, "← 返回", self.show_welcome, width=124, height=42, size=17, primary=False)
+
+    def _go_back(self, _event) -> None:
+        if self.dialog is not None or self.running:
+            return
+        if self.screen == "checklist":
+            self.show_factories()
+        elif self.screen == "factory":
+            self.show_welcome()
 
     def _dismiss_dialog(self) -> None:
         if self.dialog is not None:
@@ -318,37 +340,147 @@ class ExcessApp:
             self.dialog.destroy()
             self.dialog = None
 
+    def _draw_source_icon(self, key: str, y: int, status: str) -> None:
+        """Draw filled status circles and white symbols without emoji fonts."""
+        tag = f"source-status-{key}"
+        self.canvas.delete(tag)
+        x, y, radius = self.px(85), self.px(y), self.px(12)
+        color = {"found": SUCCESS, "error": ERROR, "warning": WARNING, "checking": "#887b6c"}[status]
+        self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius,
+                                fill=color, outline="", tags=tag)
+
+        def line(*points: float) -> None:
+            self.canvas.create_line(*points, fill=LIGHT, width=self.px(2.5),
+                                    capstyle="round", joinstyle="round", tags=tag)
+
+        if status == "found":
+            line(x - radius * .48, y, x - radius * .12, y + radius * .35,
+                 x + radius * .48, y - radius * .38)
+        elif status == "error":
+            offset = radius * .36
+            line(x - offset, y - offset, x + offset, y + offset)
+            line(x - offset, y + offset, x + offset, y - offset)
+        elif status == "warning":
+            line(x, y - radius * .48, x, y + radius * .08)
+            dot = self.px(1.5)
+            center_y = y + radius * .43
+            self.canvas.create_oval(x - dot, center_y - dot, x + dot, center_y + dot,
+                                    fill=LIGHT, outline="", tags=tag)
+        else:
+            dot = self.px(1.5)
+            for offset in (-radius * .4, 0, radius * .4):
+                self.canvas.create_oval(x + offset - dot, y - dot, x + offset + dot, y + dot,
+                                        fill=LIGHT, outline="", tags=tag)
+
     def choose_customer(self, customer: str) -> None:
         if self.running or self.dialog is not None:
             return
         self.customer = customer
-        dialog = self.dialog = AppDialog(self, "確認來源檔案", kind="checklist")
-        dialog.label(f"{customer}  /  來源檔案確認", size=13, color=CYAN, bold=True)
-        dialog.label("請確認以下檔案已放入", size=25, bold=True, pady=(0, 6))
-        dialog.label(f"input/{customer}/", size=16, color=CYAN, pady=(0, 16))
-        for filename in REQUIRED_FILES[customer]:
-            optional = filename == "next_time_excess_report"
-            dialog.label(f"•  {filename}" + ("（可選）" if optional else ""), size=17, color=MUTED if optional else WHITE, pady=(0, 8))
-        dialog.label("BOM／Item／Price 依檔名關鍵字辨識；Shortage 分頁名稱須包含 shortage。\n上一版檔名須包含 next_time；未提供時仍可產出本期報表。", size=12, color=MUTED, pady=(10, 0))
-        self.checklist_status = dialog.label("補齊檔案後，請回到此視窗按「確認無誤」。", size=12, color=MUTED, pady=(12, 0))
-        dialog.buttons("確認無誤", self.start_run, secondary_text="有缺漏，打開input資料夾", secondary_command=self.open_input_folder)
-        dialog.show(self._dismiss_dialog)
+        self._reset("checklist")
+        self.source_checks = ()
+        self._text(78, 239, "來源檔案確認", size=32, bold=True, anchor="w")
+        self._text(1122, 240, f"input/{customer}/", size=20, color=ACCENT, bold=True, anchor="e")
+        self.checklist_rows = {}
+        for index, requirement in enumerate(source_requirements(customer)):
+            y = 289 + index * 46
+            self._draw_source_icon(requirement.key, y, "checking")
+            name = self._text(112, y, requirement.label, size=21, bold=True, anchor="w")
+            detail = self._text(440, y, "正在檢查…", size=17, color=MUTED, anchor="w")
+            self.canvas.create_line(self.px(78), self.px(y + 23), self.px(1122), self.px(y + 23), fill="#b98952")
+            self.checklist_rows[requirement.key] = (name, detail, y)
+        self._text(600, 518, "支援 .xlsx／.xlsm；BOM、Item、Price 依檔名辨識，Shortage 依分頁名稱辨識。", size=15, color=MUTED)
+        self.checklist_status = self._text(600, 549, "正在檢查來源檔案，請稍候…", size=18, color=ACCENT)
+        self.checklist_button = self._button(480, 596, "正在檢查來源檔案…", self.start_run, width=440, height=54, size=22)
+        self.checklist_button.set_state("正在檢查來源檔案…", enabled=False)
+        self.rescan_button = self._button(830, 596, "重新掃描檔案", self._refresh_checklist,
+                                         width=220, height=54, size=22, primary=False)
+        self._button(135, 596, "← 返回", self.show_factories, width=124, height=42, size=17, primary=False)
+        self._refresh_checklist()
 
-    def open_input_folder(self) -> None:
-        if self.customer is None:
+    def _refresh_checklist(self, *, start_when_ready: bool = False) -> None:
+        if self.screen != "checklist" or self._check_busy:
             return
         path = customer_input_dir(self.app_root, self.customer)
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            self.folder_opener(path)
-            self.checklist_status.configure(text="已開啟 input 資料夾。補齊後，請按「確認無誤」。", fg=CYAN)
-        except Exception as exc:
-            self.checklist_status.configure(text=f"無法開啟資料夾：{path}\n{exc}", fg="#ffb7b7")
+        signature = input_signature(path)
+        self._check_busy = True
+        self.checklist_button.set_state("正在檢查來源檔案…", enabled=False)
+        self.rescan_button.set_state("掃描中…", enabled=False)
+        for key, (_name, detail, y) in self.checklist_rows.items():
+            self._draw_source_icon(key, y, "checking")
+            self.canvas.itemconfigure(detail, text="正在檢查…", fill=MUTED)
+        self.canvas.itemconfigure(self.checklist_status, text="正在檢查來源檔案，請稍候…", fill=ACCENT)
+        token, customer, events = self._check_token, self.customer, self.events
+
+        def inspect() -> None:
+            checks = check_sources(path, customer)
+            # Keep Tk objects out of this closure, including during app shutdown.
+            events.put(("checklist", (token, signature, checks, start_when_ready)))
+
+        threading.Thread(target=inspect, daemon=True, name="excess-source-check").start()
+
+    def _fit_text(self, text: str, *, size: int, width: int) -> str:
+        font = tkfont.Font(self.root, font=self.font(size))
+        if font.measure(text) <= self.px(width):
+            return text
+        # Bound the visible row without letting long filenames overlap its neighbours.
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if font.measure(text[:middle] + "…") <= self.px(width):
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low] + "…"
+
+    def _receive_checks(self, payload) -> None:
+        token, signature, checks, start_when_ready = payload
+        if token != self._check_token or self.screen != "checklist":
+            return
+        self._check_busy = False
+        self.rescan_button.set_state("重新掃描檔案", enabled=True)
+        if signature != input_signature(customer_input_dir(self.app_root, self.customer)):
+            self.source_checks = ()
+            for key, (_name, detail, y) in self.checklist_rows.items():
+                self._draw_source_icon(key, y, "warning")
+                self.canvas.itemconfigure(detail, text="檔案有變更，請重新掃描", fill=WARNING)
+            self.checklist_button.set_state("請重新掃描檔案", enabled=False)
+            self.canvas.itemconfigure(self.checklist_status,
+                                      text="掃描期間檔案有變更，請按「重新掃描檔案」再確認。", fill=WARNING)
+            return
+        self.source_checks = checks
+        for check in checks:
+            key = check.requirement.key
+            name, detail, y = self.checklist_rows[key]
+            optional_missing = check.requirement.optional and check.status == "missing"
+            color = SUCCESS if check.status == "found" else (WARNING if optional_missing else ERROR)
+            self._draw_source_icon(key, y, "found" if check.status == "found" else ("warning" if optional_missing else "error"))
+            self.canvas.itemconfigure(name, fill=INK)
+            self.canvas.itemconfigure(detail, text=self._fit_text(check.detail, size=17, width=680), fill=color)
+        blockers = [check for check in checks if check.blocks_run]
+        missing = [check for check in blockers if check.status == "missing"]
+        if not blockers:
+            status = "必要檔案已備齊；新增或更換檔案後，請重新掃描。"
+            text = "確認無誤，開始執行"
+        elif missing:
+            status = "缺少：" + "、".join(check.requirement.label for check in missing) + "。放入後請按「重新掃描檔案」。"
+            text = "請依照提示放入缺少檔案"
+        else:
+            status = "來源檔案有重複或無法讀取，修正後請按「重新掃描檔案」。"
+            text = "請依照提示修正來源檔案"
+        self.canvas.itemconfigure(self.checklist_status, text=self._fit_text(status, size=18, width=1020), fill=ERROR if blockers else SUCCESS)
+        self.checklist_button.set_state(text, enabled=not blockers)
+        if start_when_ready and not blockers:
+            self._begin_run()
 
     def start_run(self) -> None:
-        if self.running or self.customer is None:
+        if self.running or self.customer is None or self.screen != "checklist" or self._check_busy:
             return
-        self._dismiss_dialog()
+        if not self.source_checks or any(check.blocks_run for check in self.source_checks):
+            return
+        # Verify again off the UI thread: a file may have changed since the last scan.
+        self._refresh_checklist(start_when_ready=True)
+
+    def _begin_run(self) -> None:
         self.running = True
         self._show_running()
         customer = self.customer
@@ -357,30 +489,30 @@ class ExcessApp:
 
     def _show_running(self) -> None:
         self._reset("running")
-        self.time_estimator = RemainingTimeEstimator(PROGRESS_LABELS, self.timing_history.baseline(self.customer))
-        self._text(90, 305, "STEP 02  /  整理報表", size=13, color=CYAN, bold=True, anchor="w")
-        self.title_item = self._text(90, 338, "正在整理報表", size=29, bold=True, anchor="w")
-        self._text(1108, 330, f"工廠  {self.customer}", size=17, color=CYAN, bold=True, anchor="e")
-        self.phase_item = self._text(90, 375, "準備讀取來源檔案…", size=16, anchor="w")
+        self.last_progress = None
+        self._text(78, 226, "STEP 02  /  整理報表", size=17, color=ACCENT, bold=True, anchor="w")
+        self.title_item = self._text(78, 266, "正在整理報表", size=36, bold=True, anchor="w")
+        self._text(1122, 265, f"工廠  {self.customer}", size=22, color=ACCENT, bold=True, anchor="e")
+        self.phase_item = self._text(78, 313, "準備讀取來源檔案…", size=22, anchor="w")
         self.progressbar = ttk.Progressbar(self.canvas, style="Excess.Horizontal.TProgressbar", maximum=PROGRESS_STEPS, mode="determinate")
         self.widgets.append(self.progressbar)
-        self.canvas.create_window(self.px(90), self.px(400), anchor="nw", width=self.px(1020), height=self.px(12), window=self.progressbar)
-        self.count_item = self._text(90, 430, f"已完成 0 / {PROGRESS_STEPS} 個階段", size=14, color=MUTED, anchor="w")
-        self.percent_item = self._text(1110, 430, "0%  ｜  預估剩餘：估算中", size=16, color=CYAN, bold=True, anchor="e")
-        frame = tk.Frame(self.canvas, bg=PANEL, highlightbackground="#2871aa", highlightthickness=1)
+        self.canvas.create_window(self.px(78), self.px(341), anchor="nw", width=self.px(1044), height=self.px(16), window=self.progressbar)
+        self.count_item = self._text(78, 377, f"已完成 0 / {PROGRESS_STEPS} 個階段", size=18, color=MUTED, anchor="w")
+        self.percent_item = self._text(1122, 377, "0%", size=22, color=ACCENT, bold=True, anchor="e")
+        frame = tk.Frame(self.canvas, bg=PANEL, highlightbackground="#a36c32", highlightthickness=1)
         self.widgets.append(frame)
-        self.canvas.create_window(self.px(90), self.px(450), anchor="nw", width=self.px(1020), height=self.px(158), window=frame)
+        self.canvas.create_window(self.px(78), self.px(400), anchor="nw", width=self.px(1044), height=self.px(204), window=frame)
         self.log_text = tk.Text(
-            frame, bg=PANEL, fg="#d1e9ff", insertbackground=WHITE, relief="flat", bd=0,
-            font=(self.log_font_family, -max(12, self.px(16))), wrap="word", state="disabled",
-            padx=self.px(12), pady=self.px(9), takefocus=True,
-            spacing1=self.px(1), spacing3=self.px(2),
+            frame, bg=PANEL, fg=INK, insertbackground=INK, relief="flat", bd=0,
+            font=(self.log_font_family, -max(12, self.px(20))), wrap="word", state="disabled",
+            padx=self.px(16), pady=self.px(12), takefocus=True,
+            spacing1=self.px(2), spacing3=self.px(3),
         )
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview, style="Excess.Vertical.TScrollbar")
         scrollbar.pack(side="right", fill="y")
         self.log_text.configure(yscrollcommand=scrollbar.set)
         self.log_text.pack(side="left", fill="both", expand=True)
-        self.footer_item = self._text(600, 625, "請保持程式開啟，完成後會自動提示取檔。", size=12, color=MUTED)
+        self.footer_item = self._text(600, 622, "請保持程式開啟，完成後會自動提示取檔。", size=15, color=MUTED)
         self._append_log(f"工廠：{self.customer}　開始整理報表。")
 
     def _run_worker(self, customer: str) -> None:
@@ -400,18 +532,6 @@ class ExcessApp:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def _update_eta_label(self, *, force: bool = False) -> None:
-        if self.screen != "running" or self.time_estimator is None:
-            return
-        now = monotonic()
-        if not force and now < self._eta_next_update:
-            return
-        self._eta_next_update = now + 1.0
-        current = self.last_progress.current if self.last_progress else 0
-        total = self.last_progress.total if self.last_progress else PROGRESS_STEPS
-        percentage = current * 100 // max(total, 1)
-        self.canvas.itemconfigure(self.percent_item, text=f"{percentage}%  ｜  {self.time_estimator.snapshot().text}")
-
     def _handle_event(self, event) -> None:
         if isinstance(event, ProgressEvent):
             if event.kind == "message":
@@ -422,24 +542,21 @@ class ExcessApp:
                 label = PHASE_LABELS.get(event.label, event.label)
                 self.canvas.itemconfigure(self.phase_item, text=label)
                 self.canvas.itemconfigure(self.count_item, text=f"已完成 {event.current} / {event.total} 個階段")
-                self.time_estimator.observe(event.label, event.elapsed_seconds, event.stage_durations)
-                self._update_eta_label(force=True)
+                percentage = event.current * 100 // max(event.total, 1)
+                self.canvas.itemconfigure(self.percent_item, text=f"{percentage}%")
                 self._append_log(label)
             return
         kind, payload = event
+        if kind == "checklist":
+            self._receive_checks(payload)
+            return
         self.running = False
-        self.time_estimator.stop(success=kind == "success")
-        self._update_eta_label(force=True)
         if kind == "success":
             self.result = payload
-            try:
-                self.timing_history.record(self.customer, self.time_estimator.durations)
-            except OSError as exc:
-                self._append_log(f"報表已完成；無法保存耗時紀錄，下次將重新估算：{exc}")
             self._show_success()
         else:
             self.exit_code = 1
-            self.canvas.itemconfigure(self.title_item, text="報表處理失敗", fill="#ffb8bd")
+            self.canvas.itemconfigure(self.title_item, text="報表處理失敗", fill=ERROR)
             self.canvas.itemconfigure(self.footer_item, text="請查看錯誤原因，按「確認」後將關閉程式。")
             self._append_log(str(payload))
             self._show_error(payload)
@@ -451,18 +568,17 @@ class ExcessApp:
                 self._handle_event(self.events.get_nowait())
         except queue.Empty:
             pass
-        self._update_eta_label()
         self._poll_id = self.root.after(60, self._poll_events)
 
     def _show_success(self) -> None:
         self.canvas.itemconfigure(self.title_item, text="報表整理完成")
         self.canvas.itemconfigure(self.footer_item, text="按「確認」後，將開啟 output 資料夾並關閉程式。")
-        dialog = self.dialog = AppDialog(self, "報表整理完成", kind="success", width=600)
-        dialog.label("COMPLETED", size=13, color=CYAN, bold=True)
-        dialog.label("已完成，打開output資料夾取檔案", size=23, bold=True, pady=(0, 16))
-        dialog.label(f"output/{self.customer}/", size=16, color=CYAN)
-        dialog.label("excess_report.xlsx\nnext_time_excess_report.xlsx\nincomplete_alternates.xlsx", size=15, pady=(0, 12))
-        dialog.label("按「確認」後開啟資料夾，並關閉此程式。", size=13, color=MUTED)
+        dialog = self.dialog = AppDialog(self, "報表整理完成", kind="success", width=760)
+        dialog.label("COMPLETED", size=17, color=SUCCESS, bold=True)
+        dialog.label("已完成，打開output資料夾取檔案", size=29, bold=True, pady=(0, 18))
+        dialog.label(f"output/{self.customer}/", size=21, color=ACCENT)
+        dialog.label("excess_report.xlsx\nnext_time_excess_report.xlsx\nincomplete_alternates.xlsx", size=20, pady=(0, 16))
+        dialog.label("按「確認」後開啟資料夾，並關閉此程式。", size=18, color=MUTED)
         dialog.buttons("確認", self._finish_success)
         dialog.show(self._finish_success)
 
@@ -479,24 +595,29 @@ class ExcessApp:
 
     def _show_error(self, error: Exception) -> None:
         self._dismiss_dialog()
-        dialog = self.dialog = AppDialog(self, "報表處理失敗", kind="error", width=680)
-        dialog.label("PROCESSING STOPPED", size=13, color="#ffb8bd", bold=True)
-        dialog.label("無法完成本次報表", size=25, bold=True)
+        dialog = self.dialog = AppDialog(self, "報表處理失敗", kind="error", width=840)
+        dialog.label("PROCESSING STOPPED", size=17, color=ERROR, bold=True)
+        dialog.label("無法完成本次報表", size=32, bold=True)
         if isinstance(error, ReportError):
             message = error.user_message()
         else:
             phase = self.last_progress.label if self.last_progress else "啟動介面"
             message = ReportError(None, PHASE_LABELS.get(phase, phase), error).user_message()
         # A scrollable message keeps even long paths/errors inside the screen.
+        message_frame = tk.Frame(dialog.body, bg=PANEL)
+        message_frame.pack(fill="x", pady=(0, self.px(10)))
         details = tk.Text(
-            dialog.body, bg=PANEL, fg=WHITE, relief="flat", bd=0,
-            font=self.font(15), wrap="word", height=10, width=1,
+            message_frame, bg=PANEL, fg=INK, relief="flat", bd=0,
+            font=self.font(20), wrap="word", height=9, width=1,
             padx=0, pady=0, highlightthickness=0,
         )
         details.insert("1.0", message)
         details.configure(state="disabled")
-        details.pack(fill="x", pady=(0, self.px(10)))
-        dialog.label("按「確認」後，將關閉程式。", size=13, color=MUTED)
+        scrollbar = ttk.Scrollbar(message_frame, orient="vertical", command=details.yview, style="Excess.Vertical.TScrollbar")
+        details.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        details.pack(side="left", fill="both", expand=True)
+        dialog.label("按「確認」後，將關閉程式。", size=18, color=MUTED)
         dialog.buttons("確認", self._destroy)
         dialog.show(self._destroy)
 
