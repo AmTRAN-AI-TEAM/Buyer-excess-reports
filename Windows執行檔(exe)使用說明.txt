@@ -71,7 +71,7 @@ BOM 檔名只要包含 BOM 字樣即可；Item 檔名只要包含 Item 字樣即
 10. 不完全替代明細會另外輸出 incomplete_alternates.xlsx；每個不完全替代群組內，同一料號只列一行，Model 會彙總該料號在 BOM B 欄出現過的所有機種，Spec 來源為 BOM 的 COMPONENT_DESCRIPTION 第一個非空值。
 11. 程式每次會多輸出 next_time_excess_report.xlsx；下次若要計算 Improve，請將上一版的 next_time_excess_report.xlsx 放入對應 input 資料夾。若找不到檔名包含 next_time 的上一版來源，程式會顯示「找不到上一版來源，不輸出improve資訊」。
 12. RAKEN 會依料號配對，將上一版 MODEL、第一段 PO外備料 QTY、reason&action、Vendor 的人工更新承接到兩份新報表。輸入支援舊版、新版欄名；輸出不會增加操作備註列。
-13. RAKEN 的兩份輸出都會在 Customer 客戶欄寫入 Excel 2021 可用的 VLOOKUP／LET 公式，查詢同一報表 Customer sheet 的 MODEL、Customer 對照表。先查完整 MODEL；找不到時以 / 拆分多機種，全部查到才合併客戶並去重；查不到、MODEL 空白、部分機種查不到或對應衝突時，顯示紅色字體 error，不使用 Item 的 Mps Customer。紅字使用條件格式，修改 MODEL 或 Customer 對照表、新增對照列後，Excel 會重新查表，成功查到時恢復一般字色。兩份輸出都會保留 Customer 對照表；沒有來源時建立空白對照表。隱藏的 _CustomerLookup 輔助分頁用於追蹤對照資料範圍，請保留。報表開啟時會完整重算，使用 Excel 2021 開啟後即可取得公式結果。
+13. 報表使用 Excel 2016 可用的傳統公式，相容目標為 Excel 2016、2021、2024 與 Microsoft 365。RAKEN 的兩份輸出都會在 Customer 客戶欄寫入 VLOOKUP／IFERROR，透過隱藏輔助分頁查詢同一報表 Customer sheet 的 MODEL、Customer 對照表。先查完整 MODEL；找不到時以 / 拆分多機種，全部查到才合併客戶並去重；查不到、MODEL 空白、部分機種查不到或對應衝突時，顯示紅色字體 error，不使用 Item 的 Mps Customer。紅字使用條件格式，修改 MODEL 或 Customer 對照表、新增對照列後，Excel 會重新查表，成功查到時恢復一般字色。兩份輸出都會保留 Customer 對照表；沒有來源時建立空白對照表。隱藏的 _CustomerLookup 輔助分頁用傳統公式處理拆分、查表與合併，請保留；不需要巨集或手動輸入陣列公式。每列至少預留16個機種位置，且至少比本期最多機種數多4個；之後手動修改 MODEL，需要拆分且超過本次容量時顯示 error，重新產出會依輸入資料擴充。報表開啟時會完整重算。
 14. AVTC 會依主料號／完整替代料群組配對，將上一版 next_time 的 reason&action、Vendor 承接到兩份新報表，包含多行文字與刻意清空的儲存格；新料號這兩欄維持空白。AVTC 的 MODEL、Customer 仍取本期資料。Improve 以本期第一段金額減上一版第一段金額，上一版使用上一版的單價計算。
 15. 背景圖片已隨軟體放在 _internal 內，不需要原本 Downloads 的圖片。請完整保留整包資料夾。
 16. next_time_excess_report 是可選檔案，未放入時仍可產生本期報表；若有放入，則需為有效且可辨識的上一版報表。

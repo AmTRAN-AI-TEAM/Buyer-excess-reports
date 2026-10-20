@@ -101,7 +101,11 @@ def write_excess_workbook(
         lookup = CustomerLookup.from_rows(customer_rows)
         helper_sheet = workbook.create_sheet(CUSTOMER_LOOKUP_SHEET_NAME)
         helper_sheet.sheet_state = "hidden"
-        helper_sheet["A1"] = lookup.last_row_formula()
+        model_column = row2_headers.index("MODEL")
+        for helper_row in lookup.helper_rows(
+            get_column_letter(model_column + 1), [row[model_column] for row in rows],
+        ):
+            helper_sheet.append(helper_row)
         workbook.calculation.calcMode = "auto"
         workbook.calculation.fullCalcOnLoad = True
         workbook.calculation.forceFullCalc = True

@@ -274,7 +274,7 @@ def build_excess_rows(
         customer_column = row2_headers.index("Customer\n客户")
         for index in range(len(prepared_rows)):
             model_ref = _cell_ref(row2_headers, "MODEL", index + 3)
-            rows[index][customer_column] = lookup.formula_for(model_ref)
+            rows[index][customer_column] = lookup.formula_for(model_ref, len(rows) + 2)
 
     return ExcessBuildResult(
         rows=rows,
