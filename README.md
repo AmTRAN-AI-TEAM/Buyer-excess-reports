@@ -2,7 +2,7 @@
 
 從 BOM、Item/Price 與含有 `shortage` 分頁的 Excel，自動產出可用版 `Excess` 報表。
 
-程式會自動讀取檔名包含 `BOM` 的 Excel、檔名包含 `Item` 的 Excel，以及含有 `shortage` 分頁的 Excel。AVTC 價格優先來自 Item workbook 的「成本价」sheet（`Item`、`US Unit Cost`），逐料號缺價時才使用原本 Price sheet 的 `Uprice` 欄；RAKEN 會另讀檔名包含 `Price` 的 Excel，先查主料在 `Price` 與備援分頁的單價，再查同列替代料在這兩頁的單價；借用替代料價格時，單價格以紅字呈現。
+程式會自動讀取檔名包含 `BOM` 的 Excel、檔名包含 `Item` 的 Excel，以及含有 `shortage` 分頁的 Excel。AVTC 使用 Item workbook 的「成本价」與 Price sheet，依序查主料成本價、主料 `Uprice`、同列替代料成本價、同列替代料 `Uprice`；RAKEN 會另讀檔名包含 `Price` 的 Excel，先查主料在 `Price` 與備援分頁的單價，再查同列替代料在這兩頁的單價。兩種客戶借用替代料價格時，單價格皆以紅字呈現。
 
 ## 資料夾
 
@@ -65,6 +65,14 @@ input/AVTC/你的shortage檔.xlsx
 
 BOM 檔名只要包含 `BOM` 字樣即可；Item 檔名只要包含 `Item` 字樣即可；RAKEN 價格檔檔名只要包含 `Price` 字樣即可。shortage 檔內只要有分頁名稱包含 `shortage`，程式就會使用該分頁。輸入檔不需要有 `Excess` sheet。
 
+AVTC 價格規則：
+
+- 價格來自 Item workbook：「成本价」以 `Item` 查料號，取 `US Unit Cost`；Price sheet 以 `Part No.` 查料號，取 `Uprice`。
+- 每列以報表的 `PartNo1` 為主料，即使該料號沒有出現在 shortage，仍優先查它的價格。依序查找：主料的成本價 → 主料的 `Uprice` → 同列所有替代料的成本價 → 同列所有替代料的 `Uprice`。
+- 多個替代料時，同一分頁依 `替代料2`、`替代料3` 等欄位順序取第一個有效價格；所有替代料的成本價都優先於任何替代料的 `Uprice`。
+- 找不到料號、價格空白或不是有效的有限數字時才繼續查下一步；`0` 是有效價格，不會回補。沒有「成本价」sheet 時使用 Price；只有有效成本資料而沒有 Price sheet 時也可產出，主料與替代料都缺價才留白。公式價格使用 Excel 儲存的計算結果，請先計算並儲存來源檔。
+- 替代料僅限目前 BOM 嚴格使用情境規則認可、實際列在同一報表列的料號，包含未出現在 shortage 的同列替代料；不完全替代關係不納入借價。借用替代料價格時，`excess_report.xlsx` 與 `next_time_excess_report.xlsx` 的 `Price（USD)` 儲存格皆使用紅色字體，金額公式使用該單價計算；主料價格維持一般字色。執行紀錄會顯示替代料借價列數。
+
 RAKEN 價格檔規則：
 
 - 在 `input/RAKEN/` 這一層尋找檔名包含 `price` 的 `.xlsx`／`.xlsm`，不分大小寫，略過以 `~$` 開頭的暫存檔。符合的檔案必須只有一份；多份時會提示錯誤，不會依檔名日期自動挑選。
@@ -126,7 +134,7 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_r
 - `MODEL` 會優先從 BOM 的 `成品料号` sheet 帶出；若找不到，改用 Item sheet 的 `Mps Model`。
 - `MODELRemark/机种` 會從輸入 BOM 的 `BOM` sheet B 欄帶出，並依輸出列的料號群組完整列出。
 - RAKEN 的 `Customer`、`MODEL`、`MODELRemark/机种` 會放在 `GSD` 欄後方；AVTC 會將這三欄放在 `reason&action` 後方，對齊 1006 版 AVTC Excess 版型。
-- `Price（USD)` 來源依客戶 profile 讀取：AVTC 優先以 Item workbook「成本价」sheet 的 `Item` 查料號，取 `US Unit Cost`；料號不存在、價格空白或不是有效數字時，回退至原本 Price sheet 的 `Uprice`。成本為 0 視為有效價格，不會回退。若沒有「成本价」sheet，沿用原本價格來源；若只有有效成本資料而沒有 Price sheet，仍可產出報表，沒有任何可用價格的料號維持價格空白。RAKEN 依上述主料、替代料及分頁優先順序使用獨立 Price 檔的價格，借用替代料單價時標紅。同一分頁遇到同料號多筆有效價格時，仍優先取 `Allocation` 最大者，若相同再取 `Start Date` 較新的，仍相同則取分頁中較前面的第一筆。
+- `Price（USD)` 來源依客戶 profile 讀取：AVTC 與 RAKEN 分別依上述主料、替代料及分頁優先順序查價，借用替代料單價時皆標紅。同一分頁遇到同料號多筆有效價格時，仍優先取 `Allocation` 最大者，若相同再取 `Start Date` 較新的，仍相同則取分頁中較前面的第一筆。
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補前版金額時可自動重算。
 - 程式每次會多輸出 `next_time_excess_report.xlsx`。若下次執行時 input 資料夾內有檔名包含 `next_time` 的 Excel，程式會將它視為上一版來源，用第一個 `Excess TotalAMT` 區間帶入 `Previous Excess Total AMT`，並輸出 `Improve` 公式；若找不到上一版來源，終端機會顯示 `找不到上一版來源，不輸出improve資訊`，且 `Improve` 維持空白。
 - RAKEN 會依 `PartNo1` 配對上一版；若主料號順序改變，再以完整替代料群組配對。`MODEL`、第一段可手動輸入的 `PO外備料 QTY`、`reason&action`、`Vendor` 會一起承接到兩份輸出，包含使用者刻意清空的儲存格；新料號維持本期原有資料。上一版有重複主料號或重複群組時會停止並提示，避免不明確的資料配對。

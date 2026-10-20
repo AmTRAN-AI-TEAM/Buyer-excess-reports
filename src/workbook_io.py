@@ -337,13 +337,10 @@ def load_item_workbook_data(
             cost_sheet = _find_sheet_or_none(workbook.sheetnames, preferred_cost_sheet) if preferred_cost_sheet else None
             if cost_sheet is not None:
                 with file_context(item_path, "讀取成本價資料", cost_sheet):
-                    preferred_prices = {
-                        part: price
-                        for part, price in _load_prices(
-                            workbook[cost_sheet], ("US Unit Cost",), part_headers=("Item",),
-                        ).items()
-                        if isfinite(price)
-                    }
+                    preferred_prices = _load_prices(
+                        workbook[cost_sheet], ("US Unit Cost",),
+                        part_headers=("Item",), finite_only=True,
+                    )
         finally:
             workbook.close()
 
@@ -370,12 +367,18 @@ def load_item_workbook_data(
                     prices = {}
                 else:
                     with file_context(price_workbook_path, "讀取 Price 資料", price_sheet):
-                        prices = _load_prices(price_workbook[price_sheet], price_headers)
+                        prices = _load_prices(
+                            price_workbook[price_sheet], price_headers, finite_only=True,
+                        )
+                    price_sheets = (PriceSheetData(price_sheet, prices),)
         finally:
             price_workbook.close()
 
+    if cost_sheet is not None:
+        price_sheets = (PriceSheetData(cost_sheet, preferred_prices), *price_sheets)
     # A numeric zero is a valid cost and must override the fallback price too.
-    prices.update(preferred_prices)
+    # Keep the individual sheets intact for group lookup priority.
+    prices = {**prices, **preferred_prices}
     return ItemWorkbookData(
         metadata_by_part=metadata, prices_by_part=prices, price_sheets=price_sheets,
     )

@@ -193,7 +193,7 @@ def build_excess_rows(
             continue
 
         main_record = _first_record(displayed_parts, records_by_part)
-        if customer_code == "RAKEN":
+        if customer_code in {"RAKEN", "AVTC"}:
             price_match = item_data.price_for_group(displayed_parts)
             price = price_match.price if price_match is not None else None
         else:

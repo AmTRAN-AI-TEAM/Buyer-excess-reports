@@ -287,7 +287,7 @@ def generate_report(
 
         progress.message(f"Read shortage parts: {result.input_part_count}")
         progress.message(f"Generated Excess rows: {result.output_row_count}")
-        if customer_code == "RAKEN":
+        if customer_code in {"RAKEN", "AVTC"}:
             progress.message(f"替代料借價（紅字）: {len(result.alternate_price_rows)} 列")
         progress.message(f"Part columns: {result.part_column_count}")
         progress.message(f"Incomplete alternate groups: {len(alternates.incomplete_alternate_groups)}")

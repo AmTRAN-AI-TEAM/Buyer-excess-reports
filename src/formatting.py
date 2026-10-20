@@ -68,14 +68,14 @@ def write_excess_workbook(
         part_column_count,
         customer=customer,
     )
+    if customer and customer.upper() in {"RAKEN", "AVTC"} and alternate_price_rows:
+        price_column = row2_headers.index("Price（USD)") + 1
+        for row_number in alternate_price_rows:
+            cell = worksheet.cell(row_number, price_column)
+            font = copy(cell.font)
+            font.color = "FFFF0000"
+            cell.font = font
     if customer and customer.upper() == "RAKEN":
-        if alternate_price_rows:
-            price_column = row2_headers.index("Price（USD)") + 1
-            for row_number in alternate_price_rows:
-                cell = worksheet.cell(row_number, price_column)
-                font = copy(cell.font)
-                font.color = "FFFF0000"
-                cell.font = font
         customer_sheet = workbook.create_sheet("Customer")
         for row in customer_sheet_rows or (("MODEL", "Customer"),):
             customer_sheet.append(row)
