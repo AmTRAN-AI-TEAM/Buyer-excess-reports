@@ -8,7 +8,7 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 from bom_alternates import BomAlternates
 from report_history import PreviousExcessInputs, previous_value_for
-from workbook_io import ItemWorkbookData, ShortageRecord
+from workbook_io import ItemWorkbookData, PriceMatch, ShortageRecord
 
 
 INFO_HEADERS = [
@@ -95,6 +95,14 @@ class ExcessBuildResult:
     output_row_count: int
     demand_labels: tuple[str, ...]
     warnings: tuple[str, ...] = ()
+    price_matches: tuple[PriceMatch | None, ...] = ()
+
+    @property
+    def alternate_price_rows(self) -> tuple[int, ...]:
+        return tuple(
+            index + 3 for index, match in enumerate(self.price_matches)
+            if match is not None and match.is_alternate
+        )
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,7 @@ class _PreparedExcessRow:
     customer: str | None
     model: str | None
     model_remark: str | None
+    price_match: PriceMatch | None = None
     carried_values: dict[str, Any] = field(default_factory=dict)
 
 
@@ -184,6 +193,12 @@ def build_excess_rows(
             continue
 
         main_record = _first_record(displayed_parts, records_by_part)
+        if customer_code == "RAKEN":
+            price_match = item_data.price_for_group(displayed_parts)
+            price = price_match.price if price_match is not None else None
+        else:
+            price_match = None
+            price = item_data.price_for(main_record.part_no)
         customer_summary = item_data.customer_summary(displayed_parts)
         model = alternates.primary_model_for(
             record.part_no,
@@ -211,7 +226,7 @@ def build_excess_rows(
             _PreparedExcessRow(
                 parts=displayed_parts,
                 main_record=main_record,
-                price=item_data.price_for(main_record.part_no),
+                price=price,
                 overshortage_values=overshortage_values,
                 wo_values_by_period=wo_values_by_period,
                 open_po_values=open_po_values,
@@ -221,6 +236,7 @@ def build_excess_rows(
                 customer=customer_summary,
                 model=model,
                 model_remark=model_remark,
+                price_match=price_match,
                 carried_values=carried_values,
             )
         )
@@ -264,6 +280,7 @@ def build_excess_rows(
             f"Customer 查表：{issue} {count} 列，保留原有 Customer；例如：{'、'.join(warning_examples[issue])}"
             for issue, count in lookup_warnings.items()
         ),
+        price_matches=tuple(row.price_match for row in prepared_rows),
     )
 
 

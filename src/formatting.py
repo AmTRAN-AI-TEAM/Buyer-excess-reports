@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ def write_excess_workbook(
     *,
     customer: str | None = None,
     customer_sheet_rows: tuple[tuple[Any, ...], ...] | None = None,
+    alternate_price_rows: tuple[int, ...] = (),
 ) -> None:
     _validate_workbook_shape(rows, row1_headers, row2_headers)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +69,13 @@ def write_excess_workbook(
         customer=customer,
     )
     if customer and customer.upper() == "RAKEN":
+        if alternate_price_rows:
+            price_column = row2_headers.index("Price（USD)") + 1
+            for row_number in alternate_price_rows:
+                cell = worksheet.cell(row_number, price_column)
+                font = copy(cell.font)
+                font.color = "FFFF0000"
+                cell.font = font
         customer_sheet = workbook.create_sheet("Customer")
         for row in customer_sheet_rows or (("MODEL", "Customer"),):
             customer_sheet.append(row)

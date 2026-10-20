@@ -85,9 +85,24 @@ class PriceCandidate:
 
 
 @dataclass(frozen=True)
+class PriceSheetData:
+    sheet_name: str | None
+    prices_by_part: dict[str, float]
+
+
+@dataclass(frozen=True)
+class PriceMatch:
+    part_no: str
+    price: float
+    sheet_name: str | None
+    is_alternate: bool
+
+
+@dataclass(frozen=True)
 class ItemWorkbookData:
     metadata_by_part: dict[str, ItemMetadata]
     prices_by_part: dict[str, float]
+    price_sheets: tuple[PriceSheetData, ...] = ()
 
     def customer_summary(self, parts: list[str]) -> str | None:
         return _join_limited(
@@ -111,6 +126,22 @@ class ItemWorkbookData:
 
     def price_for(self, part_no: str) -> float | None:
         return self.prices_by_part.get(part_no)
+
+    def price_for_group(self, parts: list[str]) -> PriceMatch | None:
+        """Try the main part in every sheet before trying alternates by sheet."""
+        sheets = self.price_sheets or (PriceSheetData(None, self.prices_by_part),)
+        for candidates in (parts[:1], parts[1:]):
+            for sheet in sheets:
+                for part in candidates:
+                    price = sheet.prices_by_part.get(part)
+                    if price is not None:
+                        return PriceMatch(
+                            part_no=part,
+                            price=price,
+                            sheet_name=sheet.sheet_name,
+                            is_alternate=part != parts[0],
+                        )
+        return None
 
 
 def excel_files(input_dir: Path) -> list[Path]:
@@ -316,14 +347,20 @@ def load_item_workbook_data(
         finally:
             workbook.close()
 
+    price_sheets: tuple[PriceSheetData, ...] = ()
     price_workbook_path = price_path or item_path
     with file_context(price_workbook_path, "讀取 Price 資料"):
         price_workbook = load_workbook(price_workbook_path, read_only=True, data_only=True)
         try:
             if fallback_to_first_price_sheet:
-                prices = _load_prices_with_sheet_fallback(
+                price_sheets = _load_price_sheets_with_fallback(
                     price_workbook, price_workbook_path, price_headers,
                 )
+                prices = {}
+                for sheet in price_sheets:
+                    for part_no, price in sheet.prices_by_part.items():
+                        # Zero is a valid price and must retain sheet priority.
+                        prices.setdefault(part_no, price)
             else:
                 try:
                     price_sheet = _find_price_sheet(price_workbook, price_headers)
@@ -339,7 +376,9 @@ def load_item_workbook_data(
 
     # A numeric zero is a valid cost and must override the fallback price too.
     prices.update(preferred_prices)
-    return ItemWorkbookData(metadata_by_part=metadata, prices_by_part=prices)
+    return ItemWorkbookData(
+        metadata_by_part=metadata, prices_by_part=prices, price_sheets=price_sheets,
+    )
 
 
 def _find_header_row(worksheet: Worksheet) -> int:
@@ -512,18 +551,18 @@ def _load_prices(
     return {part_no: candidate.price for part_no, candidate in candidates.items()}
 
 
-def _load_prices_with_sheet_fallback(
+def _load_price_sheets_with_fallback(
     workbook: Any,
     workbook_path: Path,
     price_headers: tuple[str, ...],
-) -> dict[str, float]:
-    """Prefer Price, then fill missing parts from the first other tab."""
+) -> tuple[PriceSheetData, ...]:
+    """Keep Price and the first other tab separate, in lookup order."""
     primary_sheet = _find_sheet_or_none(workbook.sheetnames, "Price")
     fallback_sheet = next(
         (name for name in workbook.sheetnames if name != primary_sheet),
         None,
     )
-    prices: dict[str, float] = {}
+    sheets: list[PriceSheetData] = []
     for sheet_name in (primary_sheet, fallback_sheet):
         if sheet_name is None:
             continue
@@ -535,10 +574,8 @@ def _load_prices_with_sheet_fallback(
                 require_headers=True,
                 finite_only=True,
             )
-        # Membership, rather than truthiness, preserves a valid zero price.
-        for part_no, price in sheet_prices.items():
-            prices.setdefault(part_no, price)
-    return prices
+        sheets.append(PriceSheetData(sheet_name, sheet_prices))
+    return tuple(sheets)
 
 
 def _find_item_sheet(workbook: Any) -> str:

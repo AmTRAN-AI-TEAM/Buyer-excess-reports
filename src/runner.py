@@ -265,6 +265,7 @@ def generate_report(
                 result.row2_headers,
                 result.part_column_count,
                 customer=customer_code,
+                alternate_price_rows=result.alternate_price_rows,
                 customer_sheet_rows=(
                     previous_source.inputs.customer_lookup.sheet_rows
                     if previous_source and previous_source.inputs and previous_source.inputs.customer_lookup
@@ -286,6 +287,8 @@ def generate_report(
 
         progress.message(f"Read shortage parts: {result.input_part_count}")
         progress.message(f"Generated Excess rows: {result.output_row_count}")
+        if customer_code == "RAKEN":
+            progress.message(f"替代料借價（紅字）: {len(result.alternate_price_rows)} 列")
         progress.message(f"Part columns: {result.part_column_count}")
         progress.message(f"Incomplete alternate groups: {len(alternates.incomplete_alternate_groups)}")
         progress.message(f"Output: {output_file}")
