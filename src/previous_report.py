@@ -7,7 +7,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from excess_builder import PreviousExcessTotals
-from report_history import CustomerLookup, PreviousExcessInputs
+from report_history import CUSTOMER_LOOKUP_ERROR, CustomerLookup, PreviousExcessInputs
 
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
@@ -123,7 +123,10 @@ def load_previous_excess_source(
                     cached_workbook["Customer"].iter_rows(values_only=True)
                 ))
             else:
-                warnings.append("上一版沒有 Customer sheet，保留本期原有 Customer 資訊。")
+                if customer and customer.upper() == "RAKEN":
+                    warnings.append(f"上一版沒有 Customer sheet，Customer 欄將顯示紅字 {CUSTOMER_LOOKUP_ERROR}。")
+                else:
+                    warnings.append("上一版沒有 Customer sheet，保留本期原有 Customer 資訊。")
 
         return PreviousExcessSource(
             path=path,

@@ -7,7 +7,7 @@ from typing import Any
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from bom_alternates import BomAlternates
-from report_history import PreviousExcessInputs, previous_value_for
+from report_history import CUSTOMER_LOOKUP_ERROR, CustomerLookup, PreviousExcessInputs, previous_value_for
 from workbook_io import ItemWorkbookData, PriceMatch, ShortageRecord
 
 
@@ -199,7 +199,7 @@ def build_excess_rows(
         else:
             price_match = None
             price = item_data.price_for(main_record.part_no)
-        customer_summary = item_data.customer_summary(displayed_parts)
+        customer_summary = None if customer_code == "RAKEN" else item_data.customer_summary(displayed_parts)
         model = alternates.primary_model_for(
             record.part_no,
             known_parts=known_parts,
@@ -213,10 +213,8 @@ def build_excess_rows(
         }
         model = carried_values.get("MODEL", model)
         if customer_code == "RAKEN" and carry_inputs and carry_inputs.customer_lookup is not None:
-            mapped_customer, issue = carry_inputs.customer_lookup.resolve(model)
-            if issue is None:
-                customer_summary = mapped_customer
-            else:
+            _, issue = carry_inputs.customer_lookup.resolve(model)
+            if issue is not None:
                 lookup_warnings[issue] += 1
                 example = str(model) if model not in (None, "") else "（空白）"
                 if example not in warning_examples[issue] and len(warning_examples[issue]) < 5:
@@ -267,6 +265,16 @@ def build_excess_rows(
         )
         for index, row in enumerate(prepared_rows)
     ]
+    if customer_code == "RAKEN":
+        lookup = (
+            carry_inputs.customer_lookup
+            if carry_inputs and carry_inputs.customer_lookup is not None
+            else CustomerLookup.from_rows((("MODEL", "Customer"),))
+        )
+        customer_column = row2_headers.index("Customer\n客户")
+        for index in range(len(prepared_rows)):
+            model_ref = _cell_ref(row2_headers, "MODEL", index + 3)
+            rows[index][customer_column] = lookup.formula_for(model_ref)
 
     return ExcessBuildResult(
         rows=rows,
@@ -277,7 +285,7 @@ def build_excess_rows(
         output_row_count=len(rows),
         demand_labels=demand_labels,
         warnings=tuple(
-            f"Customer 查表：{issue} {count} 列，保留原有 Customer；例如：{'、'.join(warning_examples[issue])}"
+            f"Customer 查表：{issue} {count} 列，顯示紅字 {CUSTOMER_LOOKUP_ERROR}；例如：{'、'.join(warning_examples[issue])}"
             for issue, count in lookup_warnings.items()
         ),
         price_matches=tuple(row.price_match for row in prepared_rows),

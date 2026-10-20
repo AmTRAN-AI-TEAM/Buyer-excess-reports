@@ -5,14 +5,18 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+from report_history import CUSTOMER_LOOKUP_ERROR, CUSTOMER_LOOKUP_SHEET_NAME, CustomerLookup
 
 
 DEFAULT_FONT_NAME = "Microsoft YaHei"
 DEFAULT_FONT_SIZE = 9
 NEGATIVE_RED_INTEGER_FORMAT = "#,##0;[Red]-#,##0"
 NEGATIVE_RED_DECIMAL_FORMAT = "#,##0.00;[Red]-#,##0.00"
+RAKEN_PRICE_FORMAT = "#,##0.0000;[Red]-#,##0.0000"
 TOTAL_AMOUNT_SORT_FORMAT = "#,##0;;0"
 EXCESS_BASE_HEADERS = [
     "Excess\nPOQty",
@@ -76,14 +80,31 @@ def write_excess_workbook(
             font.color = "FFFF0000"
             cell.font = font
     if customer and customer.upper() == "RAKEN":
+        if rows:
+            customer_column = get_column_letter(row2_headers.index("Customer\n客户") + 1)
+            worksheet.conditional_formatting.add(
+                f"{customer_column}3:{customer_column}{len(rows) + 2}",
+                FormulaRule(
+                    formula=[f'{customer_column}3="{CUSTOMER_LOOKUP_ERROR}"'],
+                    font=Font(color="FFFF0000"),
+                ),
+            )
         customer_sheet = workbook.create_sheet("Customer")
-        for row in customer_sheet_rows or (("MODEL", "Customer"),):
+        customer_rows = customer_sheet_rows or (("MODEL", "Customer"),)
+        for row in customer_rows:
             customer_sheet.append(row)
         for row in customer_sheet:
             for cell in row:
                 cell.font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
         customer_sheet.column_dimensions["A"].width = 30
         customer_sheet.column_dimensions["B"].width = 24
+        lookup = CustomerLookup.from_rows(customer_rows)
+        helper_sheet = workbook.create_sheet(CUSTOMER_LOOKUP_SHEET_NAME)
+        helper_sheet.sheet_state = "hidden"
+        helper_sheet["A1"] = lookup.last_row_formula()
+        workbook.calculation.calcMode = "auto"
+        workbook.calculation.fullCalcOnLoad = True
+        workbook.calculation.forceFullCalc = True
     workbook.save(output_file)
 
 
@@ -117,6 +138,7 @@ def _apply_layout(
     last_column = len(row2_headers)
     last_column_letter = get_column_letter(last_column)
     excess_base_headers = _excess_base_headers(customer)
+    is_raken = bool(customer and customer.upper() == "RAKEN")
 
     _merge_excess_groups(worksheet, row2_headers, excess_base_headers)
     worksheet.auto_filter.ref = f"A2:{last_column_letter}{max(last_row, 2)}"
@@ -158,7 +180,9 @@ def _apply_layout(
         for cell in row:
             cell.border = border
             cell.font = base_font
-            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            cell.alignment = Alignment(
+                vertical="center", wrap_text=cell.row < 3 or not is_raken,
+            )
 
     for cell in worksheet[1]:
         if cell.value not in (None, ""):
@@ -216,11 +240,14 @@ def _apply_layout(
         base_header = _base_header(header)
         worksheet.column_dimensions[letter].width = widths_by_header.get(base_header, 12)
 
-    _hide_detail_columns(worksheet, row2_headers)
-
     for column in range(1, part_column_count + 1):
         letter = get_column_letter(column)
         worksheet.column_dimensions[letter].width = 16
+
+    if is_raken:
+        _group_raken_columns(worksheet, row2_headers, part_column_count)
+    else:
+        _hide_detail_columns(worksheet, row2_headers)
 
     worksheet.row_dimensions[1].height = 22
     worksheet.row_dimensions[2].height = 42
@@ -229,7 +256,7 @@ def _apply_layout(
         if _is_numeric_header(header):
             base_header = _base_header(header)
             number_format = (
-                NEGATIVE_RED_DECIMAL_FORMAT
+                (RAKEN_PRICE_FORMAT if is_raken else NEGATIVE_RED_DECIMAL_FORMAT)
                 if base_header == "Price（USD)"
                 else TOTAL_AMOUNT_SORT_FORMAT
                 if base_header == "Excess\nTotalAMT"
@@ -329,6 +356,30 @@ def _hide_detail_columns(worksheet: Any, row2_headers: list[str]) -> None:
     for column, header in enumerate(row2_headers, start=1):
         if _is_hidden_detail_header(header):
             worksheet.column_dimensions[get_column_letter(column)].hidden = True
+
+
+def _group_raken_columns(
+    worksheet: Any,
+    row2_headers: list[str],
+    part_column_count: int,
+) -> None:
+    ranges = [(2, part_column_count)] if part_column_count > 1 else []
+    start = _first_base_column_index(row2_headers, "Overshortage")
+    end = _first_base_column_index(row2_headers, "Riskbuy")
+    if start is not None and end is not None and start <= end:
+        ranges.append((start, end))
+
+    worksheet.sheet_properties.outlinePr.summaryRight = True
+    worksheet.sheet_properties.outlinePr.showOutlineSymbols = True
+    worksheet.sheet_view.showOutlineSymbols = True
+    for start, end in ranges:
+        worksheet.column_dimensions.group(
+            get_column_letter(start), get_column_letter(end),
+            outline_level=1, hidden=True,
+        )
+        worksheet.column_dimensions[get_column_letter(end + 1)].collapsed = True
+    if ranges:
+        worksheet.column_dimensions.max_outline = 1
 
 
 def _is_hidden_detail_header(header: Any) -> bool:
