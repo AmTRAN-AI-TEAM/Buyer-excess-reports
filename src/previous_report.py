@@ -7,7 +7,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from excess_builder import PreviousExcessTotals
-from report_history import CUSTOMER_LOOKUP_ERROR, CustomerLookup, PreviousExcessInputs
+from report_history import PreviousExcessInputs
 
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
@@ -66,6 +66,7 @@ def load_previous_excess_source(
             header: column for header, column in columns.input_columns.items()
             if include_excess_inputs or header in {"reason&action", "Vendor"}
         } if carry_previous_inputs else {}
+        customer_column = input_columns.get("Customer")
         cached_workbook = load_workbook(path, data_only=True, read_only=True)
         cached_worksheet = cached_workbook[worksheet.title]
         totals_by_part: dict[str, float] = {}
@@ -95,11 +96,18 @@ def load_previous_excess_source(
                 if isinstance(value, str) and value.startswith("="):
                     cached_value = _cell(cached_row, column)
                     if cached_value is None:
+                        if column == customer_column:
+                            row[column - 1] = None
+                            continue
                         raise ValueError(
                             f"Previous Excess row {row_number}, column {column} has an uncached formula; "
                             "please recalculate and save it in Excel before importing"
                         )
                     row[column - 1] = cached_value
+            if customer_column is not None:
+                customer_value = _cell(row, customer_column)
+                if isinstance(customer_value, str) and customer_value.strip().casefold() == "error":
+                    row[customer_column - 1] = None
             group = tuple(sorted(set(parts)))
             if carry_previous_inputs and (parts[0] in totals_by_part or group in totals_by_group):
                 raise ValueError(f"Ambiguous previous Excess match at row {row_number}: {parts[0]}")
@@ -115,18 +123,11 @@ def load_previous_excess_source(
                 values_by_part[parts[0]] = values
                 values_by_group[group] = values
 
-        customer_lookup = None
-        warnings: list[str] = []
-        if include_excess_inputs:
-            if "Customer" in cached_workbook.sheetnames:
-                customer_lookup = CustomerLookup.from_rows(tuple(
-                    cached_workbook["Customer"].iter_rows(values_only=True)
-                ))
-            else:
-                if customer and customer.upper() == "RAKEN":
-                    warnings.append(f"上一版沒有 Customer sheet，Customer 欄將顯示紅字 {CUSTOMER_LOOKUP_ERROR}。")
-                else:
-                    warnings.append("上一版沒有 Customer sheet，保留本期原有 Customer 資訊。")
+        customer_sheet_rows = None
+        if include_excess_inputs and "Customer" in workbook.sheetnames:
+            customer_sheet_rows = tuple(
+                workbook["Customer"].iter_rows(values_only=True)
+            )
 
         return PreviousExcessSource(
             path=path,
@@ -134,8 +135,11 @@ def load_previous_excess_source(
                 totals_by_part=totals_by_part,
                 totals_by_group=totals_by_group,
             ),
-            inputs=PreviousExcessInputs(values_by_part, values_by_group, customer_lookup) if carry_previous_inputs else None,
-            warnings=tuple(warnings),
+            inputs=PreviousExcessInputs(
+                values_by_part,
+                values_by_group,
+                customer_sheet_rows,
+            ) if carry_previous_inputs else None,
         )
     finally:
         workbook.close()
@@ -167,7 +171,7 @@ def _detect_previous_columns(headers: tuple[Any, ...]) -> _PreviousColumns:
     )
     input_columns = {
         header: column
-        for header in ("MODEL", "reason&action", "Vendor")
+        for header in ("MODEL", "Customer", "reason&action", "Vendor")
         for column in [_optional_base_column(bases, header)]
         if column is not None
     }

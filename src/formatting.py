@@ -5,12 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-
-from report_history import CUSTOMER_LOOKUP_ERROR, CUSTOMER_LOOKUP_SHEET_NAME, CustomerLookup
-
 
 DEFAULT_FONT_NAME = "Microsoft YaHei"
 DEFAULT_FONT_SIZE = 9
@@ -80,32 +76,15 @@ def write_excess_workbook(
             font.color = "FFFF0000"
             cell.font = font
     if customer and customer.upper() == "RAKEN":
-        if rows:
-            customer_column = get_column_letter(row2_headers.index("Customer\n客户") + 1)
-            worksheet.conditional_formatting.add(
-                f"{customer_column}3:{customer_column}{len(rows) + 2}",
-                FormulaRule(
-                    formula=[f'{customer_column}3="{CUSTOMER_LOOKUP_ERROR}"'],
-                    font=Font(color="FFFF0000"),
-                ),
-            )
-        customer_sheet = workbook.create_sheet("Customer")
-        customer_rows = customer_sheet_rows or (("MODEL", "Customer"),)
-        for row in customer_rows:
-            customer_sheet.append(row)
-        for row in customer_sheet:
-            for cell in row:
-                cell.font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
-        customer_sheet.column_dimensions["A"].width = 30
-        customer_sheet.column_dimensions["B"].width = 24
-        lookup = CustomerLookup.from_rows(customer_rows)
-        helper_sheet = workbook.create_sheet(CUSTOMER_LOOKUP_SHEET_NAME)
-        helper_sheet.sheet_state = "hidden"
-        model_column = row2_headers.index("MODEL")
-        for helper_row in lookup.helper_rows(
-            get_column_letter(model_column + 1), [row[model_column] for row in rows],
-        ):
-            helper_sheet.append(helper_row)
+        if customer_sheet_rows is not None:
+            customer_sheet = workbook.create_sheet("Customer")
+            for row in customer_sheet_rows:
+                customer_sheet.append(row)
+            for row in customer_sheet:
+                for cell in row:
+                    cell.font = Font(name=DEFAULT_FONT_NAME, size=DEFAULT_FONT_SIZE)
+            customer_sheet.column_dimensions["A"].width = 30
+            customer_sheet.column_dimensions["B"].width = 24
         workbook.calculation.calcMode = "auto"
         workbook.calculation.fullCalcOnLoad = True
         workbook.calculation.forceFullCalc = True

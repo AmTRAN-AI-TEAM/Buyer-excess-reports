@@ -131,19 +131,19 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_r
 - 程式會先偵測所有 Excess 列需要的最大料號數，動態產出 `PartNo1` 到 `替代料N`。
 - `OvershortageN`、各時間區間的 `WO 外demandN`、`Open poN` 也會跟著 `替代料N` 自動增加。
 - 逐料號的 `OvershortageN`、`WO 外demandN`、`Open poN` 會寫入從 shortage 算出的值。
-- AVTC 的 `Customer` 來源為 Item sheet 的 `Mps Customer`；RAKEN 使用下述 Customer 對照表公式，查不到時顯示紅字 `error`。
+- AVTC 與 RAKEN 的 `Customer` 基礎來源都是 Item sheet 的 `Mps Customer`。RAKEN 若有上一版 `next_time_excess_report.xlsx`，會依料號配對直接承接上一版 Customer 值；未配對的列留白。沒有上一版來源時使用本期 Item 值。
 - `MODEL` 會優先從 BOM 的 `成品料号` sheet 帶出；若找不到，改用 Item sheet 的 `Mps Model`。
 - `MODELRemark/机种` 會從輸入 BOM 的 `BOM` sheet B 欄帶出，並依輸出列的料號群組完整列出。
 - RAKEN 的 `Customer`、`MODEL`、`MODELRemark/机种` 會放在 `GSD` 欄後方；AVTC 會將這三欄放在 `reason&action` 後方，對齊 1006 版 AVTC Excess 版型。
 - `Price（USD)` 來源依客戶 profile 讀取：AVTC 與 RAKEN 分別依上述主料、替代料及分頁優先順序查價，借用替代料單價時皆標紅。同一分頁遇到同料號多筆有效價格時，仍優先取 `Allocation` 最大者，若相同再取 `Start Date` 較新的，仍相同則取分頁中較前面的第一筆。
 - Total 與 Excess 金額區會寫入 Excel 公式，讓使用者後續補前版金額時可自動重算。
 - 程式每次會多輸出 `next_time_excess_report.xlsx`。若下次執行時 input 資料夾內有檔名包含 `next_time` 的 Excel，程式會將它視為上一版來源，用第一個 `Excess TotalAMT` 區間帶入 `Previous Excess Total AMT`，並輸出 `Improve` 公式；若找不到上一版來源，終端機會顯示 `找不到上一版來源，不輸出improve資訊`，且 `Improve` 維持空白。
-- RAKEN 會依 `PartNo1` 配對上一版；若主料號順序改變，再以完整替代料群組配對。`MODEL`、第一段可手動輸入的 `PO外備料 QTY`、`reason&action`、`Vendor` 會一起承接到兩份輸出，包含使用者刻意清空的儲存格；新料號維持本期原有資料。上一版有重複主料號或重複群組時會停止並提示，避免不明確的資料配對。
+- RAKEN 會依 `PartNo1` 配對上一版；若主料號順序改變，再以完整替代料群組配對。`MODEL`、`Customer`、第一段可手動輸入的 `PO外備料 QTY`、`reason&action`、`Vendor` 會一起承接到兩份輸出，包含使用者刻意清空的儲存格。若提供上一版來源但找不到配對列，Customer 留白；沒有上一版來源時 Customer 使用本期 Item 的 `Mps Customer`。其他新料號資料維持本期來源。上一版有重複主料號或群組時會停止並提示，避免不明確的資料配對。
 - AVTC 以相同料號／完整替代料群組規則，將上一版手動更新的 `reason&action`、`Vendor` 承接到 `excess_report.xlsx` 與 `next_time_excess_report.xlsx`，保留多行文字及刻意清空的儲存格。新料號沒有上一版資料時，這兩欄維持空白；重複主料號或群組造成不明確配對時會停止並提示。AVTC 的 MODEL、Customer 維持本期來源。
 - Improve 維持「本期第一段 Excess Total AMT－上一版第一段 Excess Total AMT」。上一版金額依上一版資料與單價計算，不會用本期新成本重算上一版；價格變動也可能影響 Improve。
 - 上一版支援舊版與新版備料欄名，並自動辨識實際表頭列；輸出維持兩列表頭，不複製操作說明列。人工欄位若使用公式，會承接 Excel 儲存的計算結果；匯入前須先在 Excel 重算並儲存。
-- 報表使用 Excel 2016 可用的傳統公式，相容目標為 Excel 2016、2021、2024 與 Microsoft 365。RAKEN 會先承接 `MODEL`，再在兩份輸出的 `Customer客户` 儲存格寫入 `VLOOKUP`／`IFERROR`，由隱藏輔助分頁查詢同一報表的 Customer sheet。先完整比對 MODEL；找不到時，以 `/` 拆分多機種，全部查到才將客戶去重並以 `/` 合併。MODEL 空白、查不到、部分查不到或同機種有衝突對應時，公式顯示 `error`，並以條件格式標示紅色字體，不使用 Item 的 `Mps Customer`。終端機仍會顯示產出時的查表問題筆數及範例。修改 MODEL 或 Customer 對照表後，Excel 自動重新計算，新增對照列也會納入；成功查到時會恢復一般字色。
-- RAKEN 兩份輸出都會保留 Customer 對照表資料；沒有上一版 Customer sheet 時，建立只有 `MODEL`、`Customer` 表頭的空白 Customer sheet，供後續維護。隱藏的 `_CustomerLookup` 輔助分頁使用傳統 `LOOKUP`、`SUMPRODUCT` 與文字函數拆分、查表及串接機種對應的客戶，不需要新版函數、巨集或手動輸入陣列公式，請保留此分頁。每列至少預留 16 個機種位置，且至少比產出當下最多機種數多 4 個；若之後手動修改 MODEL，需要拆分且超過本次預留數量，會顯示 `error`，重新產出時會依輸入資料擴充。報表開啟時會完整重算。AVTC 承接 `reason&action`、`Vendor`，Customer 使用本期 Item 資料。
+- 報表中的金額等計算欄使用 Excel 2016 可用的傳統公式，相容目標為 Excel 2016、2021、2024 與 Microsoft 365。RAKEN 的 `Customer客户` 欄是一般儲存值，不使用公式查表；上一版 Customer 儲存格若是舊版公式，程式承接 Excel 儲存的計算結果，舊值為 `error` 或沒有快取結果時留白。
+- RAKEN 若上一版有 `Customer` 工作表，兩份輸出會保留該表作為舊資料存檔，但不再用它填入 Customer 欄；不會產生 `_CustomerLookup` 輔助分頁。AVTC 承接 `reason&action`、`Vendor`，Customer 使用本期 Item 資料。
 - 數量與金額運算結果會四捨五入到整數輸出；`Price（USD)` 在 RAKEN 顯示四位小數、AVTC 顯示兩位小數，金額公式皆使用原始單價精度。
 - AVTC 預設隱藏 `Overshortage1` 到 `OvershortageN`、各時間區間的 `WO 外demand1` 到 `WO 外demandN`、以及 `Open po1` 到 `Open poN` 細項欄，保留總欄位顯示。RAKEN 則使用上述兩個可展開的欄位群組。
 - RAKEN 每段 Excess 欄位順序為 `Excess POQty`、`Excess POAmount`、`Excess stockQTY`、`Excess stockAmount`、`Excess TotalAMT`；`Excess TotalAMT` 會加總 `Excess POAmount`、`Excess stockAmount`、`Excess  PO外備料AMT`。`reason&action`、`Vendor` 整欄會依此順序放在第一段 Excess 之後、第二段備料欄位之前。

@@ -267,8 +267,8 @@ def generate_report(
                 customer=customer_code,
                 alternate_price_rows=result.alternate_price_rows,
                 customer_sheet_rows=(
-                    previous_source.inputs.customer_lookup.sheet_rows
-                    if previous_source and previous_source.inputs and previous_source.inputs.customer_lookup
+                    previous_source.inputs.customer_sheet_rows
+                    if previous_source and previous_source.inputs
                     else None
                 ),
             )
