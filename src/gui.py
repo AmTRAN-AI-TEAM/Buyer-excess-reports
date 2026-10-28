@@ -21,13 +21,13 @@ from report_errors import ReportError
 from source_check import SourceCheck, check_sources, input_signature, source_requirements
 from runner import (
     CUSTOMERS,
-    PROGRESS_STEPS,
     ProgressEvent,
     RunResult,
     customer_input_dir,
     customer_output_file,
     generate_report,
     project_root,
+    progress_steps_for_customer,
 )
 
 
@@ -52,6 +52,7 @@ PHASE_LABELS = {
     "Read previous Excess data": "讀取上一版報表與人工更新",
     "Build Excess rows": "計算 Excess 並整理報表資料",
     "Write Excel files": "寫入 Excess 與 next_time 報表",
+    "Write Excess summary": "產生 excess_summary.xlsx",
     "Write incomplete alternates file": "寫入不完全替代料明細",
     "Done": "所有報表已完成",
 }
@@ -490,14 +491,20 @@ class ExcessApp:
     def _show_running(self) -> None:
         self._reset("running")
         self.last_progress = None
+        progress_total = progress_steps_for_customer(self.customer)
         self._text(78, 226, "STEP 02  /  整理報表", size=17, color=ACCENT, bold=True, anchor="w")
         self.title_item = self._text(78, 266, "正在整理報表", size=36, bold=True, anchor="w")
         self._text(1122, 265, f"工廠  {self.customer}", size=22, color=ACCENT, bold=True, anchor="e")
         self.phase_item = self._text(78, 313, "準備讀取來源檔案…", size=22, anchor="w")
-        self.progressbar = ttk.Progressbar(self.canvas, style="Excess.Horizontal.TProgressbar", maximum=PROGRESS_STEPS, mode="determinate")
+        self.progressbar = ttk.Progressbar(
+            self.canvas,
+            style="Excess.Horizontal.TProgressbar",
+            maximum=progress_total,
+            mode="determinate",
+        )
         self.widgets.append(self.progressbar)
         self.canvas.create_window(self.px(78), self.px(341), anchor="nw", width=self.px(1044), height=self.px(16), window=self.progressbar)
-        self.count_item = self._text(78, 377, f"已完成 0 / {PROGRESS_STEPS} 個階段", size=18, color=MUTED, anchor="w")
+        self.count_item = self._text(78, 377, f"已完成 0 / {progress_total} 個階段", size=18, color=MUTED, anchor="w")
         self.percent_item = self._text(1122, 377, "0%", size=22, color=ACCENT, bold=True, anchor="e")
         frame = tk.Frame(self.canvas, bg=PANEL, highlightbackground="#a36c32", highlightthickness=1)
         self.widgets.append(frame)
@@ -577,7 +584,14 @@ class ExcessApp:
         dialog.label("COMPLETED", size=17, color=SUCCESS, bold=True)
         dialog.label("已完成，打開output資料夾取檔案", size=29, bold=True, pady=(0, 18))
         dialog.label(f"output/{self.customer}/", size=21, color=ACCENT)
-        dialog.label("excess_report.xlsx\nnext_time_excess_report.xlsx\nincomplete_alternates.xlsx", size=20, pady=(0, 16))
+        filenames = [
+            "excess_report.xlsx",
+            "next_time_excess_report.xlsx",
+        ]
+        if self.result and self.result.summary_output_file is not None:
+            filenames.append("excess_summary.xlsx")
+        filenames.append("incomplete_alternates.xlsx")
+        dialog.label("\n".join(filenames), size=20, pady=(0, 16))
         dialog.label("按「確認」後開啟資料夾，並關閉此程式。", size=18, color=MUTED)
         dialog.buttons("確認", self._finish_success)
         dialog.show(self._finish_success)

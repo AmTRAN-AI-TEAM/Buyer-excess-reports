@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 from bom_alternates import load_bom_alternates
 from customer_profiles import profile_for
 from excess_builder import build_excess_rows
+from excess_summary import write_excess_summary
 from formatting import write_excess_workbook
 from incomplete_alternates import write_incomplete_alternates_workbook
 from previous_report import find_previous_excess_report, load_previous_excess_source
@@ -32,12 +33,30 @@ from workbook_io import (
 
 CUSTOMERS = ("AVTC", "RAKEN")
 PROGRESS_LABELS = (
-    "Find BOM", "Find Item workbook", "Find shortage sheet", "Find previous Excess report",
-    "Read BOM alternates", "Read Item/Price data", "Read shortage data", "Read previous Excess data",
-    "Build Excess rows", "Write Excel files", "Write incomplete alternates file",
+    "Find BOM",
+    "Find Item workbook",
+    "Find shortage sheet",
+    "Find previous Excess report",
+    "Read BOM alternates",
+    "Read Item/Price data",
+    "Read shortage data",
+    "Read previous Excess data",
+    "Build Excess rows",
+    "Write Excel files",
+    "Write Excess summary",
+    "Write incomplete alternates file",
 )
 PROGRESS_STEPS = len(PROGRESS_LABELS)
 NEXT_TIME_EXCESS_REPORT_NAME = "next_time_excess_report.xlsx"
+
+
+def progress_steps_for_customer(customer: str | None) -> int:
+    """Return the number of real processing stages for a customer."""
+    return (
+        PROGRESS_STEPS
+        if customer and customer.upper() in {"AVTC", "RAKEN"}
+        else PROGRESS_STEPS - 1
+    )
 
 
 @dataclass(frozen=True)
@@ -61,6 +80,7 @@ class RunResult:
     output_file: Path
     next_time_output_file: Path
     incomplete_alternates_file: Path
+    summary_output_file: Path | None
     input_part_count: int
     output_row_count: int
     part_column_count: int
@@ -183,7 +203,11 @@ def generate_report(
     customer_code = resolve_customer(customer, input_dir, output_file)
     profile = profile_for(customer_code)
 
-    with Progress(PROGRESS_STEPS, enabled=show_progress, callback=on_event) as progress:
+    with Progress(
+        progress_steps_for_customer(customer_code),
+        enabled=show_progress,
+        callback=on_event,
+    ) as progress:
         progress.step("Find BOM")
         with file_context(input_dir, "尋找 BOM 檔案"):
             bom_file = find_bom_file(input_dir)
@@ -212,7 +236,11 @@ def generate_report(
 
         progress.step("Read BOM alternates")
         with file_context(bom_file, "讀取 BOM 替代料"):
-            alternates = load_bom_alternates(bom_file)
+            alternates = load_bom_alternates(
+                bom_file,
+                include_component_usages=customer_code in {"AVTC", "RAKEN"},
+                component_usage_model_from_bom=customer_code == "RAKEN",
+            )
 
         progress.step("Read Item/Price data")
         with file_context(item_file, "讀取 Item／Price 資料"):
@@ -227,7 +255,6 @@ def generate_report(
         progress.step("Read shortage data")
         with file_context(shortage_source.path, "讀取 Shortage 資料", shortage_source.sheet_name):
             shortage_records = load_shortage_records(shortage_source)
-
         progress.step("Read previous Excess data")
         previous_source = None
         warning_messages: list[str] = []
@@ -277,6 +304,20 @@ def generate_report(
             with file_context(next_time_output_file, "寫入下次使用的上一版報表"):
                 shutil.copyfile(output_file, next_time_output_file)
 
+        summary_output_file = None
+        if customer_code in {"AVTC", "RAKEN"}:
+            progress.step("Write Excess summary")
+            summary_output_file = output_file.with_name("excess_summary.xlsx")
+            with file_context(summary_output_file, "寫入 Excess summary"):
+                model_count, top_five_count = write_excess_summary(
+                    result.summary_source_rows,
+                    result.demand_labels[-1],
+                    summary_output_file,
+                    component_usages=alternates.component_usages,
+                )
+            progress.message(f"Excess summary models: {model_count}")
+            progress.message(f"Per-model stock-amount top rows: {top_five_count}")
+
         progress.step("Write incomplete alternates file")
         incomplete_alternates_file = output_file.with_name("incomplete_alternates.xlsx")
         with file_context(incomplete_alternates_file, "寫入不完全替代料明細"):
@@ -293,6 +334,8 @@ def generate_report(
         progress.message(f"Incomplete alternate groups: {len(alternates.incomplete_alternate_groups)}")
         progress.message(f"Output: {output_file}")
         progress.message(f"Next-time Excess source: {next_time_output_file}")
+        if summary_output_file is not None:
+            progress.message(f"Excess summary: {summary_output_file}")
         progress.message(f"Incomplete alternates: {incomplete_alternates_file}")
 
     return RunResult(
@@ -304,6 +347,7 @@ def generate_report(
         output_file=output_file,
         next_time_output_file=next_time_output_file,
         incomplete_alternates_file=incomplete_alternates_file,
+        summary_output_file=summary_output_file,
         input_part_count=result.input_part_count,
         output_row_count=result.output_row_count,
         part_column_count=result.part_column_count,

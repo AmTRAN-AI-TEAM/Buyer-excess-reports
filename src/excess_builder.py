@@ -95,6 +95,7 @@ class ExcessBuildResult:
     demand_labels: tuple[str, ...]
     warnings: tuple[str, ...] = ()
     price_matches: tuple[PriceMatch | None, ...] = ()
+    summary_source_rows: tuple[ExcessSummarySourceRow, ...] = ()
 
     @property
     def alternate_price_rows(self) -> tuple[int, ...]:
@@ -111,6 +112,25 @@ class PreviousExcessTotals:
 
     def total_for(self, parts: list[str]) -> float | None:
         return previous_value_for(parts, self.totals_by_part, self.totals_by_group)
+
+
+@dataclass(frozen=True)
+class ExcessSummaryMetrics:
+    stock_qty: int
+    stock_amount: int | None
+    po_qty: int
+    po_amount: int | None
+    total_amount: int
+
+
+@dataclass(frozen=True)
+class ExcessSummarySourceRow:
+    parts: tuple[str, ...]
+    description: str | None
+    price: float | None
+    model: str | None
+    model_remark: str | None
+    period_metrics: tuple[ExcessSummaryMetrics, ...]
 
 
 @dataclass(frozen=True)
@@ -257,6 +277,17 @@ def build_excess_rows(
         )
         for index, row in enumerate(prepared_rows)
     ]
+    summary_source_rows = (
+        tuple(
+            _summary_source_row(
+                row,
+                include_excess_input_columns=layout.include_excess_input_columns,
+            )
+            for row in prepared_rows
+        )
+        if customer_code in {"AVTC", "RAKEN"}
+        else ()
+    )
     return ExcessBuildResult(
         rows=rows,
         row1_headers=row1_headers,
@@ -266,6 +297,7 @@ def build_excess_rows(
         output_row_count=len(rows),
         demand_labels=demand_labels,
         price_matches=tuple(row.price_match for row in prepared_rows),
+        summary_source_rows=summary_source_rows,
     )
 
 
@@ -562,6 +594,85 @@ def _row_formulas(
         "excess_groups": excess_groups,
         "improve": f'=IF(OR({first_total_amount_ref}<0,{previous_total}=""),"",ROUND({first_total_amount_ref}-{previous_total},0))',
     }
+
+
+def _summary_source_row(
+    row: _PreparedExcessRow,
+    *,
+    include_excess_input_columns: bool,
+) -> ExcessSummarySourceRow:
+    period_metrics: list[ExcessSummaryMetrics] = []
+    for wo_total in row.wo_totals:
+        other_demand = (
+            _summary_number(row.carried_values.get(OTHER_DEMAND_HEADER))
+            if include_excess_input_columns
+            else 0.0
+        )
+        stock_qty = _round_integer(
+            row.overshortage_total - wo_total - other_demand
+        )
+        po_qty = _round_integer(
+            row.open_po_total
+            if stock_qty > 0
+            else stock_qty + row.open_po_total
+        )
+        stock_amount = (
+            None
+            if row.price is None
+            else _round_integer(max(stock_qty, 0) * row.price)
+        )
+        po_amount = (
+            None
+            if row.price is None
+            else _round_integer(max(po_qty, 0) * row.price)
+        )
+        outside_po_amount = 0.0
+        if include_excess_input_columns and row.price is not None:
+            outside_stock_qty = _summary_number(
+                row.carried_values.get(PO_OUTSIDE_STOCK_HEADER)
+            )
+            outside_po_qty = (
+                outside_stock_qty
+                if po_qty > 0
+                else max(outside_stock_qty + po_qty, 0.0)
+            )
+            outside_po_amount = outside_po_qty * row.price
+        total_amount = (
+            0
+            if stock_amount is None or po_amount is None
+            else _round_integer(stock_amount + po_amount + outside_po_amount)
+        )
+        period_metrics.append(
+            ExcessSummaryMetrics(
+                stock_qty=stock_qty,
+                stock_amount=stock_amount,
+                po_qty=po_qty,
+                po_amount=po_amount,
+                total_amount=total_amount,
+            )
+        )
+
+    return ExcessSummarySourceRow(
+        parts=tuple(row.parts),
+        description=row.main_record.description,
+        price=row.price,
+        model=row.model,
+        model_remark=row.model_remark,
+        period_metrics=tuple(period_metrics),
+    )
+
+
+def _summary_number(value: Any) -> float:
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return 0.0
 
 
 def _cell_ref(headers: list[str], header: str, row_number: int) -> str:

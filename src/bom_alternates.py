@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,16 @@ class BomAlternateSegment:
     base_part: str
     customer: str | None
     model: str | None
+
+
+@dataclass(frozen=True)
+class BomComponentUsage:
+    row_number: int
+    model: str
+    finished_good: str | None
+    parts: tuple[str, ...]
+    usage_qty: float | None
+    part_usage_qtys: tuple[tuple[str, float | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,7 @@ class BomColumns:
     item_seq: int | None
     component: int | None
     component_description: int | None
+    extended_qty: int | None
 
 
 @dataclass
@@ -59,6 +71,7 @@ class BomAlternates:
     models_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     model_remarks_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     incomplete_alternate_groups: tuple[IncompleteAlternateGroup, ...] = ()
+    component_usages: tuple[BomComponentUsage, ...] = ()
 
     def ordered_group_for(
         self,
@@ -113,7 +126,12 @@ class BomAlternates:
         )
 
 
-def load_bom_alternates(bom_path: Path) -> BomAlternates:
+def load_bom_alternates(
+    bom_path: Path,
+    *,
+    include_component_usages: bool = False,
+    component_usage_model_from_bom: bool = False,
+) -> BomAlternates:
     workbook = load_workbook(bom_path, read_only=True, data_only=True)
     bom_sheet = _find_bom_sheet(workbook)
     bom_ws = workbook[bom_sheet]
@@ -126,14 +144,29 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
     model_remarks: dict[str, list[str]] = defaultdict(list)
     specs: dict[str, list[str]] = defaultdict(list)
     segments: list[BomAlternateSegment] = []
+    raw_component_usages: list[
+        tuple[
+            int,
+            str | None,
+            str | None,
+            str,
+            tuple[str, ...],
+            float | None,
+            tuple[tuple[str, float | None], ...],
+        ]
+    ] = []
     base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]] = defaultdict(set)
 
     current_context: tuple[Any, Any, Any] | None = None
     current_base: str | None = None
     current_base_row: int | None = None
     current_parts: list[str] = []
+    current_part_usage_qtys: list[tuple[str, float | None]] = []
     current_customer: str | None = None
     current_model: str | None = None
+    current_component_usage_model: str | None = None
+    current_finished_good: str | None = None
+    current_usage_qty: float | None = None
     order = 0
 
     for row_number, row in enumerate(
@@ -147,6 +180,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         item_seq = _cell_by_index(row, columns.item_seq)
         component = _cell_by_index(row, columns.component)
         component_description = _cell_by_index(row, columns.component_description)
+        usage_qty = _positive_number(_cell_by_index(row, columns.extended_qty))
 
         if component in (None, ""):
             continue
@@ -170,9 +204,22 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         if _is_replacement_marker(item_seq):
             if current_base and current_context == context:
                 current_parts.append(part_no)
+                current_part_usage_qtys.append((part_no, usage_qty))
             continue
 
         base_usage_contexts[part_no].add(context)
+        if include_component_usages and current_base and current_base_row is not None:
+            raw_component_usages.append(
+                (
+                    current_base_row,
+                    current_component_usage_model,
+                    current_finished_good,
+                    current_base,
+                    tuple(current_parts),
+                    current_usage_qty,
+                    tuple(current_part_usage_qtys),
+                )
+            )
         _append_segment(
             segments,
             current_base_row,
@@ -186,11 +233,31 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         current_base = part_no
         current_base_row = row_number
         current_parts = [part_no]
+        current_part_usage_qtys = [(part_no, usage_qty)]
         current_customer, current_model = _finished_good_metadata(
             top_assembly,
             finished_goods,
         )
+        current_component_usage_model = current_model or (
+            _text_or_none(model_remark)
+            if component_usage_model_from_bom
+            else None
+        )
+        current_finished_good = _text_or_none(top_assembly)
+        current_usage_qty = usage_qty
 
+    if include_component_usages and current_base and current_base_row is not None:
+        raw_component_usages.append(
+            (
+                current_base_row,
+                current_component_usage_model,
+                current_finished_good,
+                current_base,
+                tuple(current_parts),
+                current_usage_qty,
+                tuple(current_part_usage_qtys),
+            )
+        )
     _append_segment(
         segments,
         current_base_row,
@@ -206,6 +273,39 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
         model_remarks,
         specs,
     )
+    usage_parts_by_row = {
+        segment.row_number: set(segment.parts) for segment in segments
+    }
+    component_usages: tuple[BomComponentUsage, ...] = ()
+    if include_component_usages:
+        component_usages = tuple(
+            BomComponentUsage(
+                row_number=row_number,
+                model=model or "",
+                finished_good=finished_good,
+                parts=tuple(
+                    part
+                    for part in dict.fromkeys(_raw_parts)
+                    if part in usage_parts_by_row.get(row_number, {base_part})
+                ) or (base_part,),
+                usage_qty=usage_qty,
+                part_usage_qtys=tuple(
+                    (part, quantity)
+                    for part, quantity in dict.fromkeys(part_usage_qtys)
+                    if part in usage_parts_by_row.get(row_number, {base_part})
+                ) or ((base_part, usage_qty),),
+            )
+            for (
+                row_number,
+                model,
+                finished_good,
+                base_part,
+                _raw_parts,
+                usage_qty,
+                part_usage_qtys,
+            ) in raw_component_usages
+            if finished_good
+        )
 
     segments_by_part: dict[str, list[BomAlternateSegment]] = defaultdict(list)
     for segment in segments:
@@ -226,6 +326,7 @@ def load_bom_alternates(bom_path: Path) -> BomAlternates:
             for key, values in model_remarks.items()
         },
         incomplete_alternate_groups=incomplete_alternate_groups,
+        component_usages=component_usages,
     )
 
 
@@ -268,6 +369,7 @@ def _detect_bom_columns(worksheet: Any) -> BomColumns:
             item_seq=6,
             component=7,
             component_description=8,
+            extended_qty=14,
         )
 
     headers = _header_map(
@@ -307,6 +409,13 @@ def _detect_bom_columns(worksheet: Any) -> BomColumns:
             "Component Description",
             "Description",
             "Desc",
+        ),
+        extended_qty=_optional_header(
+            headers,
+            "EXTENDED_QTY",
+            "EXTENDED_QT",
+            "EXTENDED QUANTITY",
+            "Extended Qty",
         ),
     )
 
@@ -559,6 +668,18 @@ def _text_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _positive_number(value: Any) -> float | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(number) or number <= 0:
+        return None
+    return number
 
 
 def _unique_values(source: dict[str, tuple[str, ...]], parts: list[str]) -> list[str]:
