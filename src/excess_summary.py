@@ -124,12 +124,8 @@ def write_excess_summary(
         summary_by_model.values(),
         key=lambda item: (-item.on_hand_amount, item.model.casefold()),
     )
-    summary_top_by_model = {
-        model: entries[:SUMMARY_TOP_LIMIT]
-        for model, entries in top_five_by_model.items()
-    }
-    suggestions_by_model = _recommend_production_orders(
-        summary_top_by_model,
+    recommendable_entries_by_model, suggestions_by_model = _recommend_production_orders(
+        top_five_by_model,
         component_usages,
     )
     top_five = [
@@ -139,7 +135,9 @@ def write_excess_summary(
     ]
     for summary in summaries:
         suggestions = suggestions_by_model.get(summary.key, ())
-        summary_top_entries = top_five_by_model.get(summary.key, ())[:SUMMARY_TOP_LIMIT]
+        summary_top_entries = recommendable_entries_by_model.get(summary.key) or (
+            top_five_by_model.get(summary.key, ())[:SUMMARY_TOP_LIMIT]
+        )
         for entry in summary_top_entries:
             part_no = entry.source.parts[0] if entry.source.parts else ""
             summary.gating_notes.append(
@@ -158,7 +156,7 @@ def write_excess_summary(
                 )
             else:
                 summary.gating_notes.append(
-                    "暫不建議加單：前兩名庫存沒有找到完整相符的 BOM 成品／替代料用料群及正數 EXTENDED_QT，或替代料用量不一致而無法可靠換算。"
+                    "暫不建議加單：Top 5 庫存沒有找到完整相符的 BOM 成品／替代料用料群及正數 EXTENDED_QT，或替代料用量不一致而無法可靠換算。"
                 )
         if summary.gating_notes:
             gating = "\n".join(summary.gating_notes)
@@ -252,10 +250,13 @@ def _top_five_entries(
 def _recommend_production_orders(
     top_five_by_model: dict[str, list[_TopFiveEntry]],
     component_usages: tuple[BomComponentUsage, ...],
-) -> dict[str, tuple[_ProductionSuggestion, ...]]:
-    """Assign each Top 5 inventory pool once to its best BOM consumption option."""
+) -> tuple[
+    dict[str, tuple[_TopFiveEntry, ...]],
+    dict[str, tuple[_ProductionSuggestion, ...]],
+]:
+    """Select up to two BOM-matched entries per model and assign each pool once."""
     if not _has_usable_component_usage(component_usages):
-        return {}
+        return {}, {}
 
     pools: dict[int, _InventoryPool] = {}
     owner_by_pool: dict[int, str] = {}
@@ -351,6 +352,23 @@ def _recommend_production_orders(
             -negative_usage,
         )
 
+    recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]] = {}
+    selected_pool_keys: set[int] = set()
+    for model, entries in top_five_by_model.items():
+        recommendable_entries = tuple(
+            entry
+            for entry in entries
+            if entry.source_row in assignments
+        )[:SUMMARY_TOP_LIMIT]
+        if recommendable_entries:
+            recommendable_entries_by_model[model] = recommendable_entries
+            selected_pool_keys.update(entry.source_row for entry in recommendable_entries)
+    assignments = {
+        pool_key: assignment
+        for pool_key, assignment in assignments.items()
+        if pool_key in selected_pool_keys
+    }
+
     assigned_by_product_slot_part: dict[
         tuple[str, frozenset[str], str], list[int]
     ] = {}
@@ -425,7 +443,7 @@ def _recommend_production_orders(
                 )
             )
 
-    return {
+    return recommendable_entries_by_model, {
         model: tuple(
             sorted(
                 suggestions,

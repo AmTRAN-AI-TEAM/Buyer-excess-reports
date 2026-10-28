@@ -71,6 +71,8 @@ class BomAlternates:
     models_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     model_remarks_by_part: dict[str, tuple[str, ...]] = field(default_factory=dict)
     incomplete_alternate_groups: tuple[IncompleteAlternateGroup, ...] = ()
+    # Summary advice uses alternatives listed for each BOM row, even when the
+    # report's stricter cross-context alternate rule rejects that relationship.
     component_usages: tuple[BomComponentUsage, ...] = ()
 
     def ordered_group_for(
@@ -273,9 +275,6 @@ def load_bom_alternates(
         model_remarks,
         specs,
     )
-    usage_parts_by_row = {
-        segment.row_number: set(segment.parts) for segment in segments
-    }
     component_usages: tuple[BomComponentUsage, ...] = ()
     if include_component_usages:
         component_usages = tuple(
@@ -283,17 +282,10 @@ def load_bom_alternates(
                 row_number=row_number,
                 model=model or "",
                 finished_good=finished_good,
-                parts=tuple(
-                    part
-                    for part in dict.fromkeys(_raw_parts)
-                    if part in usage_parts_by_row.get(row_number, {base_part})
-                ) or (base_part,),
+                parts=tuple(dict.fromkeys(_raw_parts)) or (base_part,),
                 usage_qty=usage_qty,
-                part_usage_qtys=tuple(
-                    (part, quantity)
-                    for part, quantity in dict.fromkeys(part_usage_qtys)
-                    if part in usage_parts_by_row.get(row_number, {base_part})
-                ) or ((base_part, usage_qty),),
+                part_usage_qtys=tuple(dict.fromkeys(part_usage_qtys))
+                or ((base_part, usage_qty),),
             )
             for (
                 row_number,
