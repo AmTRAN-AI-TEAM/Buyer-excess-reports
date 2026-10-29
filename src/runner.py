@@ -314,6 +314,7 @@ def generate_report(
                     result.demand_labels[-1],
                     summary_output_file,
                     component_usages=alternates.component_usages,
+                    customer=customer_code,
                 )
             progress.message(f"Excess summary models: {model_count}")
             progress.message(f"Per-model stock-amount top rows: {top_five_count}")

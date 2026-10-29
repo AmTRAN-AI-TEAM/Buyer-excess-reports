@@ -72,7 +72,6 @@ class _ProductionSuggestion:
     quantity: int
     consumed_amount: float
     consumed_items: tuple[tuple[int, str, str, float, float], ...]
-    shared_order: bool = False
 
 
 @dataclass
@@ -87,6 +86,7 @@ def write_excess_summary(
     output_file: Path,
     *,
     component_usages: tuple[BomComponentUsage, ...] = (),
+    customer: str | None = None,
 ) -> tuple[int, int]:
     """Write a model summary and each model's five highest stock amounts.
 
@@ -117,7 +117,10 @@ def write_excess_summary(
     summary_ws = workbook.active
     summary_ws.title = "AVTC Summary"
     summary_ws["A1"] = f"選取區間：{period_label}"
-    for column, header in enumerate(SUMMARY_HEADERS, start=1):
+    summary_headers = list(SUMMARY_HEADERS)
+    if customer and customer.upper() == "RAKEN":
+        summary_headers[0] = "Raken"
+    for column, header in enumerate(summary_headers, start=1):
         summary_ws.cell(3, column, header)
 
     summaries = sorted(
@@ -254,7 +257,7 @@ def _recommend_production_orders(
     dict[str, tuple[_TopFiveEntry, ...]],
     dict[str, tuple[_ProductionSuggestion, ...]],
 ]:
-    """Select up to two BOM-matched entries per model and assign each pool once."""
+    """Select up to two BOM-matched entries per model and calculate each independently."""
     if not _has_usable_component_usage(component_usages):
         return {}, {}
 
@@ -369,79 +372,31 @@ def _recommend_production_orders(
         if pool_key in selected_pool_keys
     }
 
-    assigned_by_product_slot_part: dict[
-        tuple[str, frozenset[str], str], list[int]
-    ] = {}
-    for pool_key, (finished_good_key, slot_parts, matched_part, _usage_qty) in assignments.items():
-        assigned_by_product_slot_part.setdefault(
-            (finished_good_key, slot_parts, matched_part), []
-        ).append(pool_key)
-
-    product_order_qty: dict[str, int] = {}
-    for finished_good_key in finished_good_names:
-        slot_order_qtys: list[int] = []
-        for (slot_finished_good, slot_parts), slot in usage_slots.items():
-            if slot_finished_good != finished_good_key:
-                continue
-            alternative_order_qty = 0
-            part_usage = slot["part_usage"]
-            for part in part_usage:
-                pool_keys = assigned_by_product_slot_part.get(
-                    (finished_good_key, slot_parts, part), ()
-                )
-                if not pool_keys:
-                    continue
-                stock_qty = sum(pools[key].quantity for key in pool_keys)
-                usage_qty = part_usage[part]
-                if stock_qty > 0 and usage_qty > 0:
-                    alternative_order_qty += ceil(stock_qty / usage_qty)
-            if alternative_order_qty:
-                slot_order_qtys.append(alternative_order_qty)
-        if slot_order_qtys:
-            product_order_qty[finished_good_key] = max(slot_order_qtys)
-
-    pools_by_product: dict[str, list[int]] = {}
-    for pool_key, (finished_good_key, _slot_parts, _part, _usage_qty) in assignments.items():
-        pools_by_product.setdefault(finished_good_key, []).append(pool_key)
-
     suggestions_by_model: dict[str, list[_ProductionSuggestion]] = {}
-    for finished_good_key in sorted(pools_by_product):
-        order_qty = product_order_qty.get(finished_good_key, 0)
-        if order_qty <= 0:
+    for pool_key, (finished_good_key, _slot_parts, matched_part, usage_qty) in assignments.items():
+        pool = pools[pool_key]
+        if pool.quantity <= 0 or usage_qty <= 0:
             continue
-        pool_keys = pools_by_product[finished_good_key]
-        owners = {owner_by_pool[key] for key in pool_keys}
-        shared_order = len(owners) > 1
-        target_name = finished_good_names.get(finished_good_key, finished_good_key)
-        for owner in sorted(owners):
-            owner_pool_keys = [key for key in pool_keys if owner_by_pool[key] == owner]
-            consumed_amount = sum(
-                entries_by_pool[key].stock_amount for key in owner_pool_keys
+        entry = entries_by_pool[pool_key]
+        owner = owner_by_pool[pool_key]
+        consumed_item = (
+            entry.rank,
+            "／".join(entry.source.parts),
+            part_names_by_pool[pool_key].get(matched_part, matched_part),
+            pool.quantity,
+            usage_qty,
+        )
+        suggestions_by_model.setdefault(owner, []).append(
+            _ProductionSuggestion(
+                target_finished_good=finished_good_names.get(
+                    finished_good_key,
+                    finished_good_key,
+                ),
+                quantity=ceil(pool.quantity / usage_qty),
+                consumed_amount=entry.stock_amount,
+                consumed_items=(consumed_item,),
             )
-            consumed_items = tuple(
-                sorted(
-                    (
-                        entries_by_pool[key].rank,
-                        "／".join(entries_by_pool[key].source.parts),
-                        part_names_by_pool[key].get(matched_part, matched_part),
-                        pools[key].quantity,
-                        usage_qty,
-                    )
-                    for key in owner_pool_keys
-                    for _finished_good, _slot_parts, matched_part, usage_qty in [
-                        assignments[key]
-                    ]
-                )
-            )
-            suggestions_by_model.setdefault(owner, []).append(
-                _ProductionSuggestion(
-                    target_finished_good=target_name,
-                    quantity=order_qty,
-                    consumed_amount=consumed_amount,
-                    consumed_items=consumed_items,
-                    shared_order=shared_order,
-                )
-            )
+        )
 
     return recommendable_entries_by_model, {
         model: tuple(
@@ -465,27 +420,18 @@ def _suggestion_text(suggestion: _ProductionSuggestion) -> str:
         + f"庫存 {_format_quantity(quantity)} 件 ÷ BOM EXTENDED_QT {_format_quantity(usage_qty)} 件/台"
         for rank, part_label, matched_part, quantity, usage_qty in suggestion.consumed_items
     )
-    shared_order_note = (
-        "（與其他 MODEL 共用同一筆加單，台數勿重複加總）"
-        if suggestion.shared_order
-        else ""
-    )
     return (
         f"建議對成品料號 {suggestion.target_finished_good} 加排 {suggestion.quantity:,} 台；"
         f"依現有 Excess 庫存估算可消耗 USD {int(round(suggestion.consumed_amount)):,}"
-        f"（{used_items}）。{shared_order_note}"
+        f"（{used_items}）。"
     )
 
 
 def _suggestion_order_text(suggestion: _ProductionSuggestion) -> str:
     ranks = sorted({rank for rank, *_rest in suggestion.consumed_items})
     rank_text = "、".join(f"Top {rank}" for rank in ranks)
-    shared_order_note = (
-        "（共用同一筆加單，台數勿重複加總）" if suggestion.shared_order else ""
-    )
     return (
         f"{rank_text}：{suggestion.target_finished_good} × {suggestion.quantity:,} 台"
-        f"{shared_order_note}"
     )
 
 
