@@ -82,6 +82,7 @@ class ExcessLayout:
     include_excess_input_columns: bool = False
     blank_columns_before_excess: int = 0
     after_first_excess_headers: tuple[str, ...] = ()
+    missing_price_amounts_as_zero: bool = False
 
 
 @dataclass(frozen=True)
@@ -399,6 +400,7 @@ def _layout_for_customer(
         include_excess_input_columns=include_excess_input_columns
         or customer_code == "RAKEN",
         after_first_excess_headers=("reason&action", "Vendor") if customer_code == "RAKEN" else (),
+        missing_price_amounts_as_zero=customer_code == "RAKEN",
     )
 
 
@@ -474,6 +476,7 @@ def _build_output_row(
         demand_labels,
         include_excess_input_columns=layout.include_excess_input_columns,
         po_outside_stock_value=row.carried_values.get(PO_OUTSIDE_STOCK_HEADER),
+        missing_price_amounts_as_zero=layout.missing_price_amounts_as_zero,
     )
 
     values: list[Any] = (
@@ -512,6 +515,7 @@ def _row_formulas(
     *,
     include_excess_input_columns: bool = False,
     po_outside_stock_value: Any = None,
+    missing_price_amounts_as_zero: bool = False,
 ) -> dict[str, Any]:
     overshortage_total = _cell_ref(row2_headers, "Overshortage", row_number)
     overshortage_first = _cell_ref(row2_headers, "Overshortage1", row_number)
@@ -575,14 +579,16 @@ def _row_formulas(
             total_amount_terms += f"+{po_outside_amount}"
             total_amount_blank_checks += f',{po_outside_amount}=""'
 
+        missing_price_amount = "0" if missing_price_amounts_as_zero else '""'
+
         wo_total_formulas.append(f"=ROUND(SUM({wo_first}:{wo_last}),0)")
         excess_groups.append(
             {
                 "input_values": input_values,
                 "stock_qty": stock_qty_formula,
-                "stock_amount": f'=IF({price}="","",ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
+                "stock_amount": f'=IF({price}="",{missing_price_amount},ROUND(IF({stock_qty}<0,0,{stock_qty}*{price}),0))',
                 "po_qty": f"=ROUND(IF({stock_qty}>0,{open_po_total},{stock_qty}+{open_po_total}),0)",
-                "po_amount": f'=IF({price}="","",ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
+                "po_amount": f'=IF({price}="",{missing_price_amount},ROUND(IF({po_qty}>0,{po_qty}*{price},0),0))',
                 "total_amount": f"=IF(OR({total_amount_blank_checks}),0,ROUND({total_amount_terms},0))",
             }
         )
