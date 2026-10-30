@@ -13,7 +13,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     tqdm = None
 
-from bom_alternates import load_bom_alternates
+from bom_alternates import load_bom_alternates, load_bom_models
 from customer_profiles import profile_for
 from excess_builder import build_excess_rows
 from excess_summary import write_excess_summary
@@ -50,13 +50,14 @@ PROGRESS_STEPS = len(PROGRESS_LABELS)
 NEXT_TIME_EXCESS_REPORT_NAME = "next_time_excess_report.xlsx"
 
 
-def progress_steps_for_customer(customer: str | None) -> int:
+def progress_steps_for_customer(
+    customer: str | None,
+    *,
+    include_summary: bool = True,
+) -> int:
     """Return the number of real processing stages for a customer."""
-    return (
-        PROGRESS_STEPS
-        if customer and customer.upper() in {"AVTC", "RAKEN"}
-        else PROGRESS_STEPS - 1
-    )
+    has_summary = bool(customer and customer.upper() in {"AVTC", "RAKEN"})
+    return PROGRESS_STEPS - (0 if has_summary and include_summary else 1)
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,13 @@ class RunResult:
     input_part_count: int
     output_row_count: int
     part_column_count: int
+
+
+@dataclass(frozen=True)
+class SummaryModelSelection:
+    selected_models: tuple[str, ...] | None
+    include_summary: bool
+    cancelled: bool = False
 
 
 class Progress:
@@ -197,6 +205,8 @@ def generate_report(
     customer: str | None = None,
     show_progress: bool = True,
     on_event: Callable[[ProgressEvent], None] | None = None,
+    summary_models: tuple[str, ...] | None = None,
+    include_summary: bool = True,
 ) -> RunResult:
     input_dir = input_dir.resolve()
     output_file = output_file.resolve()
@@ -204,7 +214,10 @@ def generate_report(
     profile = profile_for(customer_code)
 
     with Progress(
-        progress_steps_for_customer(customer_code),
+        progress_steps_for_customer(
+            customer_code,
+            include_summary=include_summary,
+        ),
         enabled=show_progress,
         callback=on_event,
     ) as progress:
@@ -239,7 +252,7 @@ def generate_report(
             alternates = load_bom_alternates(
                 bom_file,
                 include_component_usages=customer_code in {"AVTC", "RAKEN"},
-                component_usage_model_from_bom=customer_code == "RAKEN",
+                component_usage_model_from_bom=customer_code in {"AVTC", "RAKEN"},
             )
 
         progress.step("Read Item/Price data")
@@ -305,7 +318,7 @@ def generate_report(
                 shutil.copyfile(output_file, next_time_output_file)
 
         summary_output_file = None
-        if customer_code in {"AVTC", "RAKEN"}:
+        if customer_code in {"AVTC", "RAKEN"} and include_summary:
             progress.step("Write Excess summary")
             summary_output_file = output_file.with_name("excess_summary.xlsx")
             with file_context(summary_output_file, "寫入 Excess summary"):
@@ -315,6 +328,7 @@ def generate_report(
                     summary_output_file,
                     component_usages=alternates.component_usages,
                     customer=customer_code,
+                    selected_models=summary_models,
                 )
             progress.message(f"Excess summary models: {model_count}")
             progress.message(f"Per-model stock-amount top rows: {top_five_count}")
@@ -361,6 +375,12 @@ def customer_input_dir(root: Path, customer: str) -> Path:
 
 def customer_output_file(root: Path, customer: str) -> Path:
     return root / "output" / customer.upper() / "excess_report.xlsx"
+
+
+def load_summary_models(input_dir: Path) -> tuple[str, ...]:
+    """Read the distinct BOM MODEL values used by the summary selector."""
+    bom_file = find_bom_file(input_dir)
+    return load_bom_models(bom_file)
 
 
 def resolve_customer(customer: str | None, *paths: Path | None) -> str | None:
@@ -456,8 +476,263 @@ def select_customer_prompt() -> str | None:
         print("輸入無法辨識，請重新輸入。")
 
 
+def select_summary_models_prompt(
+    models: tuple[str, ...],
+) -> tuple[tuple[str, ...] | None, bool]:
+    """Prompt for summary target models; return (models, include_summary)."""
+    selected = set(models)
+    print("\n請選擇要列入 summary 第一張「加單建議」的 BOM MODEL：")
+    print("預設全選；輸入搜尋文字篩選，編號可用逗號分隔切換勾選。")
+    print("指令：A 全選、N 全取消、D 完成、S 略過 summary。")
+
+    while True:
+        query = input("搜尋 MODEL（直接 Enter 顯示全部）：").strip().casefold()
+        matches = [model for model in models if query in model.casefold()]
+        if matches:
+            for index, model in enumerate(matches, start=1):
+                mark = "x" if model in selected else " "
+                print(f"  [{mark}] {index}. {model}")
+        else:
+            print("  沒有符合的 MODEL。")
+        print(f"已選取 {len(selected)} / {len(models)} 個 MODEL。")
+
+        action = input("切換編號 / A全選 / N全取消 / D完成 / S略過 summary：").strip()
+        normalized = action.casefold()
+        if normalized in {"a", "all", "全部"}:
+            selected = set(models)
+            continue
+        if normalized in {"n", "none", "清除"}:
+            selected.clear()
+            continue
+        if normalized in {"s", "skip"}:
+            return None, False
+        if normalized in {"d", "done", "完成"}:
+            if selected:
+                if len(selected) == len(models):
+                    return None, True
+                return tuple(model for model in models if model in selected), True
+            print("目前沒有勾選 MODEL；請勾選項目，或輸入 S 略過 summary。")
+            continue
+
+        try:
+            indexes = {
+                int(value.strip())
+                for value in action.split(",")
+                if value.strip()
+            }
+        except ValueError:
+            print("輸入無法辨識，請使用搜尋文字、編號或指令。")
+            continue
+        if not indexes or any(index < 1 or index > len(matches) for index in indexes):
+            print(f"請輸入 1 到 {len(matches)} 的編號。")
+            continue
+        for index in indexes:
+            model = matches[index - 1]
+            if model in selected:
+                selected.remove(model)
+            else:
+                selected.add(model)
+
+
+def select_summary_models_window(
+    models: tuple[str, ...],
+) -> SummaryModelSelection | None:
+    """Open a searchable MODEL picker; return None when Tk cannot open."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except Exception as exc:  # pragma: no cover - depends on local Tk install
+        print(f"無法載入 MODEL 選擇介面：{exc}", file=sys.stderr)
+        return None
+
+    try:
+        root = tk.Tk()
+    except Exception as exc:  # pragma: no cover - headless environments
+        print(f"無法開啟 MODEL 選擇介面，改用終端機選單：{exc}", file=sys.stderr)
+        return None
+
+    result: list[SummaryModelSelection] = []
+    background = "#fff7e8"
+    panel = "#fff2db"
+    ink = "#422715"
+    muted = "#6b452b"
+
+    root.title("選擇加單建議 MODEL")
+    root.configure(bg=background)
+    root.resizable(True, True)
+    root.geometry("920x660")
+    root.minsize(760, 500)
+    try:
+        root.attributes("-topmost", True)
+        root.after(700, lambda: root.attributes("-topmost", False))
+    except tk.TclError:
+        pass
+
+    body = tk.Frame(root, bg=background, padx=24, pady=20)
+    body.pack(fill="both", expand=True)
+    body.grid_columnconfigure(0, weight=1)
+    body.grid_rowconfigure(2, weight=1)
+
+    tk.Label(
+        body,
+        text="選擇要列入 summary「加單建議」的 BOM MODEL",
+        bg=background,
+        fg=ink,
+        font=("TkDefaultFont", 17, "bold"),
+        anchor="w",
+    ).grid(row=0, column=0, sticky="ew")
+    tk.Label(
+        body,
+        text="預設全選。可搜尋 MODEL 並個別勾選；略過會只跳過 summary。",
+        bg=background,
+        fg=muted,
+        font=("TkDefaultFont", 10),
+        anchor="w",
+    ).grid(row=1, column=0, sticky="ew", pady=(5, 12))
+
+    controls = tk.Frame(body, bg=background)
+    controls.grid(row=2, column=0, sticky="nsew")
+    controls.grid_columnconfigure(1, weight=1)
+    controls.grid_rowconfigure(1, weight=1)
+
+    search_var = tk.StringVar()
+    tk.Label(
+        controls,
+        text="搜尋 MODEL：",
+        bg=background,
+        fg=ink,
+        font=("TkDefaultFont", 10),
+    ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 9))
+    search_entry = ttk.Entry(controls, textvariable=search_var)
+    search_entry.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(0, 9), ipady=5)
+    all_var = tk.BooleanVar(value=bool(models))
+    all_checkbox = tk.Checkbutton(
+        controls,
+        text="全選所有 MODEL",
+        variable=all_var,
+        bg=background,
+        activebackground=background,
+        fg=ink,
+        font=("TkDefaultFont", 10, "bold"),
+        command=lambda: toggle_all(),
+    )
+    all_checkbox.grid(row=0, column=2, sticky="e", pady=(0, 9))
+
+    list_frame = tk.Frame(controls, bg=panel, highlightbackground="#b98952", highlightthickness=1)
+    list_frame.grid(row=1, column=0, columnspan=3, sticky="nsew")
+    list_frame.grid_columnconfigure(0, weight=1)
+    list_frame.grid_rowconfigure(0, weight=1)
+    canvas = tk.Canvas(list_frame, bg=panel, highlightthickness=0)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    inner = tk.Frame(canvas, bg=panel)
+    inner_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(inner_window, width=event.width))
+    canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-int(event.delta / 120), "units"))
+    canvas.bind("<Button-4>", lambda _event: canvas.yview_scroll(-1, "units"))
+    canvas.bind("<Button-5>", lambda _event: canvas.yview_scroll(1, "units"))
+
+    variables: dict[str, tk.BooleanVar] = {}
+    buttons: dict[str, tk.Checkbutton] = {}
+    for index, model in enumerate(models):
+        variable = tk.BooleanVar(value=True)
+        button = tk.Checkbutton(
+            inner,
+            text=model,
+            variable=variable,
+            bg=panel,
+            activebackground=panel,
+            fg=ink,
+            selectcolor=background,
+            font=("TkDefaultFont", 10),
+            anchor="w",
+            justify="left",
+            wraplength=370,
+            command=lambda: sync_selection(),
+        )
+        button.grid(row=index // 2, column=index % 2, sticky="ew", padx=8, pady=3)
+        variables[model] = variable
+        buttons[model] = button
+    inner.grid_columnconfigure(0, weight=1)
+    inner.grid_columnconfigure(1, weight=1)
+
+    footer = tk.Frame(body, bg=background)
+    footer.grid(row=3, column=0, sticky="ew", pady=(11, 0))
+    count_label = tk.Label(footer, bg=background, fg=muted, font=("TkDefaultFont", 10), anchor="w")
+    count_label.pack(side="left", fill="x", expand=True)
+    button_row = tk.Frame(footer, bg=background)
+    button_row.pack(side="right")
+
+    def close_with(selection: SummaryModelSelection) -> None:
+        result.append(selection)
+        root.destroy()
+
+    def cancel() -> None:
+        close_with(SummaryModelSelection(None, False, cancelled=True))
+
+    def skip() -> None:
+        close_with(SummaryModelSelection(None, False))
+
+    def confirm() -> None:
+        chosen = tuple(model for model in models if variables[model].get())
+        if not chosen:
+            root.bell()
+            count_label.configure(text="請至少選擇一個 MODEL，或按略過 summary。", fg="#9b2727")
+            return
+        close_with(
+            SummaryModelSelection(
+                None if len(chosen) == len(models) else chosen,
+                True,
+            )
+        )
+
+    ttk.Button(button_row, text="取消執行", command=cancel).pack(side="left", padx=(0, 8), ipadx=8, ipady=5)
+    ttk.Button(button_row, text="略過此頁，不產出summary", command=skip).pack(side="left", padx=(0, 8), ipadx=8, ipady=5)
+    confirm_button = ttk.Button(button_row, text="確認選取", command=confirm)
+    confirm_button.pack(side="left", ipadx=12, ipady=5)
+
+    def filter_models(*_args) -> None:
+        query = search_var.get().strip().casefold()
+        visible = [model for model in models if query in model.casefold()]
+        for button in buttons.values():
+            button.grid_remove()
+        for index, model in enumerate(visible):
+            buttons[model].grid(row=index // 2, column=index % 2, sticky="ew", padx=8, pady=3)
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def sync_selection() -> None:
+        selected_count = sum(variable.get() for variable in variables.values())
+        all_var.set(bool(models) and selected_count == len(models))
+        count_label.configure(text=f"已選取 {selected_count} / {len(models)} 個 MODEL", fg=muted)
+        confirm_button.configure(state="normal" if selected_count else "disabled")
+
+    def toggle_all() -> None:
+        for variable in variables.values():
+            variable.set(all_var.get())
+        sync_selection()
+
+    search_var.trace_add("write", filter_models)
+    if not models:
+        count_label.configure(text="BOM 中沒有可選的非空 MODEL。", fg="#a86312")
+        all_checkbox.configure(state="disabled")
+        confirm_button.configure(state="disabled")
+    else:
+        sync_selection()
+
+    root.protocol("WM_DELETE_WINDOW", cancel)
+    root.bind("<Escape>", lambda _event: cancel())
+    _center_tk_window(root)
+    root.grab_set()
+    search_entry.focus_set()
+    root.mainloop()
+    return result[0] if result else SummaryModelSelection(None, False, cancelled=True)
+
+
 def select_customer() -> str | None:
-    if is_frozen_app() or sys.platform.startswith("win"):
+    if is_frozen_app():
         selected = select_customer_window()
         if selected:
             return selected
@@ -552,9 +827,30 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         customer = resolve_customer(customer, input_dir, output_file)
 
+        summary_models: tuple[str, ...] | None = None
+        include_summary = True
+        if customer in {"AVTC", "RAKEN"} and sys.stdin is not None and sys.stdin.isatty():
+            bom_models = load_summary_models(input_dir)
+            selection = select_summary_models_window(bom_models)
+            if selection is None:
+                summary_models, include_summary = select_summary_models_prompt(bom_models)
+            elif selection.cancelled:
+                print("已取消執行。")
+                return 1
+            else:
+                summary_models = selection.selected_models
+                include_summary = selection.include_summary
+
         if customer:
             print(f"Customer: {customer}")
-        generate_report(input_dir, output_file, customer=customer, show_progress=not args.no_progress)
+        generate_report(
+            input_dir,
+            output_file,
+            customer=customer,
+            show_progress=not args.no_progress,
+            summary_models=summary_models,
+            include_summary=include_summary,
+        )
         print("Done.")
         return 0
     except Exception as exc:  # noqa: BLE001 - show friendly exe errors

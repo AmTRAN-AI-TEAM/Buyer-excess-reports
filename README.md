@@ -36,7 +36,9 @@ pip install -r requirements.txt
 python3 generate_buyer_excess_report.py
 ```
 
-首頁使用 `assets/app_background.png` 的木紋背景，配合較大的內容區、文字與按鈕；視窗會依螢幕空間等比縮放，最大寬度為 1440px。按 Start、選擇 AVTC 或 RAKEN 後，程式會自動檢查對應 `input/<工廠>/` 內的來源檔案。
+首頁使用 `assets/app_background.png` 的木紋背景，配合較大的內容區、文字與按鈕；視窗會依螢幕空間等比縮放，最大寬度為 1440px。按 Start、選擇 AVTC 或 RAKEN 後，會先從該客戶 BOM 讀取不重複的 `MODEL`，供使用者選擇要列入加單建議的機種；確認或略過後，再檢查對應 `input/<工廠>/` 內的來源檔案。
+
+MODEL 選擇頁支援搜尋、個別勾選及全選。按「確認選取」會產生 summary；第一張「加單建議」沿用摘要頁的欄位與版型，依所選的 Excess 來源 MODEL 篩選摘要列。Gating 保留 Top 1／Top 2 庫存料號與金額，並列出各自對應的 BOM MODEL 加排台數，不顯示計算過程；「AVTC建议加单」欄與完整摘要頁一致。AVTC 的完整摘要頁仍名為 `AVTC Summary`，RAKEN 則名為 `Raken summary`；兩者的完整 Gating 與 `Top 5明細` 均保留。按「略過此頁，不產出summary」時，本次不寫入 `excess_summary.xlsx`，其他報表照常產生；若輸出資料夾已有舊版 summary，程式會保留該檔、不會自動刪除。終端機互動模式也會提供 MODEL 搜尋與選取；非互動執行預設全選。
 
 檔案確認畫面逐項顯示實心狀態圖示、實際檔名及缺漏或錯誤提示：綠色圓圈內白色勾號代表找到來源，紅色圓圈內白色叉號代表缺少必要來源或有錯誤，橘黃色圓圈內白色驚嘆號代表未提供選填的上一版。圖示由程式繪製，外觀不依賴 emoji 字型。右上角只顯示 `input/AVTC/` 或 `input/RAKEN/`。
 
@@ -44,7 +46,7 @@ BOM、Item、RAKEN 的 Price 依檔名關鍵字辨識；Shortage 會實際檢查
 
 必要檔案缺少時，主要按鈕顯示「請依照提示放入缺少檔案」，反灰且不能點擊或用鍵盤觸發；來源有重複候選或無法讀取時，也會提示並停用。補齊後按「重新掃描檔案」，檢查通過才改為「確認無誤，開始執行」，按下後會再次檢查再開始。兩顆按鈕整組置中。`next_time_excess_report` 為選填，未提供時顯示驚嘆號且仍可執行；若提供多份則須先排除重複。這一步檢查檔案與分頁是否可辨識，完整欄位及資料驗證仍在報表處理期間進行。
 
-處理期間，介面會顯示即時執行紀錄與 12 個階段的進度，包含獨立的 `excess_summary.xlsx` 產生階段。進度代表已完成的階段數，各階段耗時不同。所有報表都成功寫入後才會提示完成；按「確認」開啟對應 output 資料夾並關閉程式。若失敗，提示框會顯示實際檔案、處理階段及原因，按「確認」後關閉程式。處理中不接受關閉視窗，請等待結果。
+處理期間，介面會顯示即時執行紀錄與進度；產生 summary 時共 12 個階段，略過 summary 時為 11 個階段。進度代表已完成的階段數，各階段耗時不同。所有本次選擇要產生的報表都成功寫入後才會提示完成；按「確認」開啟對應 output 資料夾並關閉程式。若失敗，提示框會顯示實際檔案、處理階段及原因，按「確認」後關閉程式。處理中不接受關閉視窗，請等待結果。
 
 執行紀錄以 20px 為基準顯示（1200px 寬視窗），隨視窗等比縮放，並增加行距與紀錄區高度。處理畫面顯示目前階段、已完成階段數、百分比與即時紀錄，不再顯示預估剩餘時間，也不再讀寫 `.app_state/run_timings.json`。
 
@@ -90,18 +92,18 @@ RAKEN 價格檔規則：
 python3 src/main.py
 ```
 
-程式會先讓你選擇 `AVTC` 或 `RAKEN`，再讀取對應的 `input/<客戶>/`，並在執行時顯示 `tqdm` 進度條。
+互動終端機會先讓你選擇 `AVTC` 或 `RAKEN`，接著開啟 MODEL 選擇視窗；預設全選，可搜尋、個別勾選、全選，或略過 summary。若執行環境沒有可用的圖形桌面，會退回終端文字選單。執行時顯示 `tqdm` 進度條；非互動模式預設全選 MODEL。
 
 輸出：
 
 ```text
 output/RAKEN/excess_report.xlsx
 output/RAKEN/next_time_excess_report.xlsx
-output/RAKEN/excess_summary.xlsx
+output/RAKEN/excess_summary.xlsx（未略過 summary 時產生）
 output/RAKEN/incomplete_alternates.xlsx
 output/AVTC/excess_report.xlsx
 output/AVTC/next_time_excess_report.xlsx
-output/AVTC/excess_summary.xlsx
+output/AVTC/excess_summary.xlsx（未略過 summary 時產生）
 output/AVTC/incomplete_alternates.xlsx
 ```
 
@@ -115,8 +117,8 @@ python3 src/main.py --customer AVTC
 客戶模式會分別讀取與輸出：
 
 ```text
-input/RAKEN/ -> output/RAKEN/excess_report.xlsx + output/RAKEN/next_time_excess_report.xlsx + output/RAKEN/excess_summary.xlsx + output/RAKEN/incomplete_alternates.xlsx
-input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_report.xlsx  + output/AVTC/excess_summary.xlsx + output/AVTC/incomplete_alternates.xlsx
+input/RAKEN/ -> output/RAKEN/excess_report.xlsx + output/RAKEN/next_time_excess_report.xlsx + output/RAKEN/excess_summary.xlsx（未略過時） + output/RAKEN/incomplete_alternates.xlsx
+input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_report.xlsx  + output/AVTC/excess_summary.xlsx（未略過時） + output/AVTC/incomplete_alternates.xlsx
 ```
 
 ## 目前產出邏輯
@@ -150,7 +152,7 @@ input/AVTC/  -> output/AVTC/excess_report.xlsx  + output/AVTC/next_time_excess_r
 - AVTC 預設隱藏 `Overshortage1` 到 `OvershortageN`、各時間區間的 `WO 外demand1` 到 `WO 外demandN`、以及 `Open po1` 到 `Open poN` 細項欄，保留總欄位顯示。RAKEN 則使用上述兩個可展開的欄位群組。
 - RAKEN 每段 Excess 欄位順序為 `Excess POQty`、`Excess POAmount`、`Excess stockQTY`、`Excess stockAmount`、`Excess TotalAMT`；`Excess TotalAMT` 會加總 `Excess POAmount`、`Excess stockAmount`、`Excess  PO外備料AMT`。`reason&action`、`Vendor` 整欄會依此順序放在第一段 Excess 之後、第二段備料欄位之前。
 - AVTC 每段 Excess 欄位順序為 `Excess stockQTY`、`Excess stockAmount`、`Excess POQty`、`Excess POAmount`、`Excess TotalAMT`；`Excess TotalAMT` 會加總 `Excess POAmount` 與 `Excess stockAmount`，且每段 Excess 標題會使用不同底色。
-- AVTC 與 RAKEN 都輸出 `excess_summary.xlsx`，工作表名稱與 Top 5／加單評估規則相同；`AVTC Summary` 的 A 欄標題依流程顯示「AVTC」或「Raken」，其餘欄位標題一致。內容依最後一期的 Excess 欄位彙總至 `AVTC Summary`，明細列於 `Top 5明細`；摘要按 `MODEL` 分組，空白 MODEL 歸入「未分類（MODEL空白）」，每個 MODEL 各自依 `Excess stockAmount` 取前五筆。Gating 與 AVTC建议加单列每個 MODEL Top 5 中依排名最先可配對 BOM 的兩項，並保留原排名；Top 5明細仍列五名，並移除 MODELRemark 與 Desc。建議只依 Excess stock QTY 與 BOM 的 `TOP_ASSEMBLY_ITEM`、`EXTENDED_QT` 換算，不讀 Shortage PP TTL。每筆庫存只分配給一個可行成品，優先選每台用量較高者；用量相同時依 BOM 列序與成品料號決定。每筆建議獨立以該筆 Excess stock QTY ÷ 對應 BOM EXTENDED_QT 計算所需台數（向上取整），消耗金額只列該筆 Excess 庫存金額；不同 Excess 料號或 MODEL 即使對應相同 `TOP_ASSEMBLY_ITEM`，也不合併或共用加單台數。相同成品、相同替代料群的 BOM 用量會先合併；摘要可使用 BOM 單列明列的替代料及該列用量，不要求替代料涵蓋主料在其他成品的所有使用情境；一般 Excess 報表的替代料規則不變。其他 BOM 料件由一般供料流程供應。摘要數值寫成固定值，不使用 MSI 範本公式或 Excess 報表的公式快取。RAKEN BOM 的 `MODEL` 欄會提供 BOM 用料所屬的產品機種；成品料號來自 Top Assembly。加單建議不讀 Shortage／PP 需求；Shortage 僅供產生 Excess 報表本身使用。RAKEN 摘要另依 Excess 欄位口徑計算：`Excess stockQTY` 扣除 `others demand`，`Excess TotalAMT` 納入 `Excess  PO外備料AMT`；該備料金額依上一版承接的 `PO外備料 QTY` 計算。若來源沒有可辨識的 BOM 用量或成品料號，摘要及 Top 5 仍會產生，但加單欄會說明原因。
+- AVTC 與 RAKEN 可輸出 `excess_summary.xlsx`，工作表依序為 `加單建議`、客戶摘要頁、`Top 5明細`；客戶摘要頁名為 AVTC 的 `AVTC Summary` 或 RAKEN 的 `Raken summary`，A 欄標題依流程顯示「AVTC」或「Raken」，其餘欄位標題一致。執行前可從 BOM 的 `MODEL` 欄搜尋並選取 Excess 來源 MODEL。第一張「加單建議」沿用摘要頁欄位與版型，依選取的來源 MODEL 篩選列；其 Gating 顯示 Top 1／Top 2 庫存料號與金額，以及各自對應的 BOM MODEL 加排台數，不顯示計算過程。「AVTC建议加单」欄與客戶摘要頁一致。已選但沒有 Excess 摘要資料的 MODEL 會列出備註；客戶摘要頁與 `Top 5明細` 維持完整資料，不受選取範圍影響。按略過會跳過本次 summary 寫入，其他報表仍會產生。內容依最後一期的 Excess 欄位彙總至客戶摘要頁，明細列於 `Top 5明細`；摘要按 `MODEL` 分組，空白 MODEL 歸入「未分類（MODEL空白）」，每個 MODEL 各自依 `Excess stockAmount` 取前五筆。Gating 與 AVTC建议加单列每個 MODEL Top 5 中依排名最先可配對 BOM 的兩項，並保留原排名；Top 5明細仍列五名，並移除 MODELRemark 與 Desc。建議依每筆 Excess 庫存料號及替代料配對 BOM 的 `MODEL`、`TOP_ASSEMBLY_ITEM`、`EXTENDED_QT` 換算，不讀 Shortage PP TTL。每筆庫存只分配給一個可行的 BOM 用料情境，優先選每台用量較高者；用量相同時依 BOM 列序、MODEL、成品料號決定。每筆建議獨立以該筆 Excess stock QTY ÷ 對應 BOM EXTENDED_QT 計算所需台數（向上取整），Gating 及 AVTC建议加单以 BOM MODEL 為加排目標，Gating 同時顯示估算用的 TOP_ASSEMBLY_ITEM；建議對象依配對結果的 BOM MODEL 決定，不要求與摘要分組的 MODEL 同名；消耗金額只列該筆 Excess 庫存金額，不合併或共用不同庫存項目的加單台數。相同 MODEL、成品料號、相同替代料群的 BOM 用量會先合併；摘要可使用 BOM 單列明列的替代料及該列用量，不要求替代料涵蓋主料在其他成品的所有使用情境；一般 Excess 報表的替代料規則不變。其他 BOM 料件由一般供料流程供應。摘要數值寫成固定值，不使用 MSI 範本公式或 Excess 報表的公式快取。RAKEN 與 AVTC 的加單建議均使用 BOM 的 `MODEL` 欄作為目標；`TOP_ASSEMBLY_ITEM` 用於識別 BOM 用料情境及追溯用量。加單建議不讀 Shortage／PP 需求；Shortage 僅供產生 Excess 報表本身使用。RAKEN 摘要另依 Excess 欄位口徑計算：`Excess stockQTY` 扣除 `others demand`，`Excess TotalAMT` 納入 `Excess  PO外備料AMT`；該備料金額依上一版承接的 `PO外備料 QTY` 計算。若來源沒有可辨識的 BOM MODEL、用量或成品料號，摘要及 Top 5 仍會產生，但加單欄會說明原因。
 - RAKEN 輸出會在第一個 Excess 區塊前插入 `others demand`，並在每個 Excess 區塊前插入 `PO外備料 QTY`、`Excess PO外備料QTY`、`Excess  PO外備料AMT`。其中 `others demand` 與第一段 `PO外備料 QTY` 由使用者填寫；後續各段 `PO外備料 QTY` 以公式引用第一段，請只修改第一段。各段 Excess 備料數量與金額仍依該段需求重新計算。
 - AVTC 不輸出 `others demand`、`PO外備料`、`PO外備料QTY`、`PO外備料AMT`，並會在 `Riskbuy` 與第一段 Excess 中間保留兩個空白欄。
 - RAKEN 每段 `Excess stockQTY` 會扣除該時間區間的 `WO外demand`，並再扣除 `others demand`；AVTC 每段 `Excess stockQTY` 只扣除該時間區間的 `WO外demand`。
@@ -170,7 +172,7 @@ build_exe.bat
 release/BuyerExcessReports/BuyerExcessReports.exe
 ```
 
-使用者收到整個 `BuyerExcessReports` 資料夾後，只要把檔案放進 `input/AVTC` 或 `input/RAKEN`，再雙擊 exe、按 Start 並選擇工廠即可。Windows 版本使用 `--windowed` 打包，執行期間不會開啟終端機；圖片、Tkinter 與 Pillow 都會一起打包，使用者不需要安裝 Python，也不需要原本 Downloads 的圖片。
+使用者收到整個 `BuyerExcessReports` 資料夾後，只要把檔案放進 `input/AVTC` 或 `input/RAKEN`，再雙擊 exe、按 Start 並選擇工廠；接著可搜尋、勾選 BOM MODEL 或略過 summary。Windows 版本使用 `--windowed` 打包，執行期間不會開啟終端機；圖片、Tkinter 與 Pillow 都會一起打包，使用者不需要安裝 Python，也不需要原本 Downloads 的圖片。
 
 請在 Windows 執行 `build_exe.bat`，產生可供 Windows 使用的執行檔。
 

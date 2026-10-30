@@ -26,6 +26,7 @@ from runner import (
     customer_input_dir,
     customer_output_file,
     generate_report,
+    load_summary_models,
     project_root,
     progress_steps_for_customer,
 )
@@ -226,6 +227,286 @@ class AppDialog(tk.Toplevel):
             self.primary_button.focus_set()
 
 
+class ModelSelectionDialog(tk.Toplevel):
+    def __init__(
+        self,
+        app: "ExcessApp",
+        *,
+        customer: str,
+        initial_models: tuple[str, ...] | None,
+        on_confirm: Callable[[tuple[str, ...] | None], None],
+        on_skip: Callable[[], None],
+        on_back: Callable[[], None],
+    ) -> None:
+        super().__init__(app.root)
+        self.app = app
+        self.on_confirm = on_confirm
+        self.on_skip = on_skip
+        self.on_back = on_back
+        self.initial_models = initial_models
+        self.models: tuple[str, ...] = ()
+        self.model_vars: dict[str, tk.BooleanVar] = {}
+        self.model_buttons: dict[str, tk.Checkbutton] = {}
+
+        self.title("選擇加單建議 MODEL")
+        self.configure(bg="#a36c32")
+        self.resizable(True, True)
+        self.minsize(app.px(820), app.px(560))
+        self.transient(app.root)
+        self.protocol("WM_DELETE_WINDOW", on_back)
+        self.bind("<Escape>", lambda _event: on_back())
+
+        body = tk.Frame(self, bg=PANEL, padx=app.px(24), pady=app.px(20))
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(3, weight=1)
+
+        tk.Label(
+            body,
+            text=f"{customer}：選擇要產出的加單建議 MODEL",
+            bg=PANEL,
+            fg=INK,
+            font=app.font(28, True),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            body,
+            text="選項來自 BOM 的 MODEL 欄。新工作表只列出勾選 MODEL 的加單建議。",
+            bg=PANEL,
+            fg=MUTED,
+            font=app.font(16),
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(app.px(6), app.px(12)))
+
+        controls = tk.Frame(body, bg=PANEL)
+        controls.grid(row=2, column=0, sticky="ew", pady=(0, app.px(8)))
+        controls.grid_columnconfigure(0, weight=1)
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(
+            controls,
+            textvariable=self.search_var,
+            font=app.font(17),
+            relief="solid",
+            bd=1,
+        )
+        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, app.px(12)), ipady=app.px(7))
+        self.search_entry.configure(state="disabled")
+        self.search_placeholder = "搜尋 MODEL…"
+        self.search_var.set(self.search_placeholder)
+        self.search_entry.bind("<FocusIn>", self._clear_search_placeholder)
+        self.search_entry.bind("<FocusOut>", self._restore_search_placeholder)
+
+        self.all_var = tk.BooleanVar(value=True)
+        self.all_checkbox = tk.Checkbutton(
+            controls,
+            text="全選所有 MODEL",
+            variable=self.all_var,
+            command=self._toggle_all,
+            bg=PANEL,
+            activebackground=PANEL,
+            fg=INK,
+            selectcolor=LIGHT,
+            font=app.font(16, True),
+            state="disabled",
+        )
+        self.all_checkbox.grid(row=0, column=1, sticky="e")
+
+        list_frame = tk.Frame(body, bg=PANEL, highlightbackground="#b98952", highlightthickness=1)
+        list_frame.grid(row=3, column=0, sticky="nsew")
+        list_frame.grid_columnconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(0, weight=1)
+        self.list_canvas = tk.Canvas(list_frame, bg=PANEL, highlightthickness=0)
+        self.list_canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            command=self.list_canvas.yview,
+            style="Excess.Vertical.TScrollbar",
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.list_canvas.configure(yscrollcommand=scrollbar.set)
+        self.list_inner = tk.Frame(self.list_canvas, bg=PANEL)
+        self.list_window = self.list_canvas.create_window(
+            (0, 0), window=self.list_inner, anchor="nw"
+        )
+        self.list_inner.bind(
+            "<Configure>",
+            lambda _event: self.list_canvas.configure(
+                scrollregion=self.list_canvas.bbox("all")
+            ),
+        )
+        self.list_canvas.bind(
+            "<Configure>",
+            lambda event: self.list_canvas.itemconfigure(
+                self.list_window,
+                width=event.width,
+            ),
+        )
+        self.list_canvas.bind(
+            "<MouseWheel>",
+            lambda event: self.list_canvas.yview_scroll(
+                -int(event.delta / 120), "units"
+            ),
+        )
+
+        footer = tk.Frame(body, bg=PANEL)
+        footer.grid(row=4, column=0, sticky="ew", pady=(app.px(10), 0))
+        self.count_label = tk.Label(
+            footer,
+            text="正在讀取 BOM MODEL…",
+            bg=PANEL,
+            fg=MUTED,
+            font=app.font(15),
+            anchor="w",
+        )
+        self.count_label.pack(side="left", fill="x", expand=True)
+        button_row = tk.Frame(footer, bg=PANEL)
+        button_row.pack(side="right")
+        self.back_button = ActionButton(
+            button_row,
+            "返回",
+            on_back,
+            width=app.px(105),
+            height=app.px(48),
+            font=app.font(16, True),
+            primary=False,
+        )
+        self.back_button.pack(side="left", padx=(0, app.px(8)))
+        self.skip_button = ActionButton(
+            button_row,
+            "略過此頁，不產出summary",
+            on_skip,
+            width=app.px(260),
+            height=app.px(48),
+            font=app.font(15, True),
+            primary=False,
+        )
+        self.skip_button.pack(side="left", padx=(0, app.px(8)))
+        self.confirm_button = ActionButton(
+            button_row,
+            "確認選取",
+            self._confirm,
+            width=app.px(155),
+            height=app.px(48),
+            font=app.font(16, True),
+        )
+        self.confirm_button.set_state("讀取中…", enabled=False)
+        self.confirm_button.pack(side="left")
+
+        self.search_var.trace_add("write", self._filter_models)
+        self.update_idletasks()
+        width, height = app.px(980), app.px(650)
+        x = app.root.winfo_rootx() + (app.width - width) // 2
+        y = app.root.winfo_rooty() + (app.height - height) // 2
+        x = max(0, min(x, self.winfo_screenwidth() - width))
+        y = max(30, min(y, self.winfo_screenheight() - height - 40))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.grab_set()
+
+    def set_models(self, models: tuple[str, ...] | None, error: Exception | None = None) -> None:
+        if error is not None:
+            self.count_label.configure(
+                text=f"讀取 BOM MODEL 失敗：{error}",
+                fg=ERROR,
+            )
+            self.confirm_button.set_state("無 MODEL 清單", enabled=False)
+            self.all_checkbox.configure(state="disabled")
+            return
+        self.models = models or ()
+        if not self.models:
+            self.count_label.configure(text="BOM 中沒有可選的非空 MODEL。", fg=WARNING)
+            self.confirm_button.set_state("無 MODEL 清單", enabled=False)
+            self.all_checkbox.configure(state="disabled")
+            return
+
+        initially_selected = (
+            set(self.models)
+            if self.initial_models is None
+            else set(self.initial_models)
+        )
+        self.model_vars.clear()
+        self.model_buttons.clear()
+        for index, model in enumerate(self.models):
+            variable = tk.BooleanVar(value=model in initially_selected)
+            button = tk.Checkbutton(
+                self.list_inner,
+                text=model,
+                variable=variable,
+                command=self._sync_selection,
+                bg=PANEL,
+                activebackground=PANEL,
+                fg=INK,
+                selectcolor=LIGHT,
+                font=self.app.font(15),
+                anchor="w",
+                justify="left",
+                wraplength=self.app.px(405),
+            )
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=self.app.px(8), pady=self.app.px(3))
+            self.model_vars[model] = variable
+            self.model_buttons[model] = button
+        self.list_inner.grid_columnconfigure(0, weight=1)
+        self.list_inner.grid_columnconfigure(1, weight=1)
+        self.search_entry.configure(state="normal")
+        self.search_entry.delete(0, "end")
+        self.search_entry.insert(0, self.search_placeholder)
+        self.all_checkbox.configure(state="normal")
+        self._filter_models()
+        self._sync_selection()
+        self.search_entry.focus_set()
+
+    def _clear_search_placeholder(self, _event=None) -> None:
+        if self.search_var.get() == self.search_placeholder:
+            self.search_var.set("")
+
+    def _restore_search_placeholder(self, _event=None) -> None:
+        if not self.search_var.get():
+            self.search_var.set(self.search_placeholder)
+
+    def _filter_models(self, *_args) -> None:
+        query = self.search_var.get().strip().casefold()
+        if query == self.search_placeholder.casefold():
+            query = ""
+        visible = [model for model in self.models if query in model.casefold()]
+        for model, button in self.model_buttons.items():
+            button.grid_remove()
+        for index, model in enumerate(visible):
+            self.model_buttons[model].grid(
+                row=index // 2,
+                column=index % 2,
+                sticky="ew",
+                padx=self.app.px(8),
+                pady=self.app.px(3),
+            )
+        self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all"))
+
+    def _toggle_all(self) -> None:
+        selected = self.all_var.get()
+        for variable in self.model_vars.values():
+            variable.set(selected)
+        self._sync_selection()
+
+    def _sync_selection(self) -> None:
+        selected_count = sum(variable.get() for variable in self.model_vars.values())
+        self.all_var.set(bool(self.models) and selected_count == len(self.models))
+        self.count_label.configure(
+            text=f"已選取 {selected_count} / {len(self.models)} 個 MODEL",
+            fg=MUTED,
+        )
+        self.confirm_button.set_state(
+            "確認選取",
+            enabled=selected_count > 0,
+        )
+
+    def _confirm(self) -> None:
+        selected = tuple(
+            model for model in self.models if self.model_vars[model].get()
+        )
+        self.grab_release()
+        self.destroy()
+        self.on_confirm(None if len(selected) == len(self.models) else selected)
+
+
 class ExcessApp:
     def __init__(
         self,
@@ -238,9 +519,11 @@ class ExcessApp:
         self.app_root = app_root or project_root()
         self.folder_opener = folder_opener
         self.events: queue.Queue = queue.Queue()
-        self.dialog: AppDialog | None = None
+        self.dialog: tk.Toplevel | None = None
         self.widgets: list[tk.Widget] = []
         self.customer: str | None = None
+        self.summary_models: tuple[str, ...] | None = None
+        self.include_summary = True
         self.running = False
         self.exit_code = 0
         self.screen = "welcome"
@@ -249,6 +532,7 @@ class ExcessApp:
         self.worker: threading.Thread | None = None
         self._check_token = 0
         self._check_busy = False
+        self._model_token = 0
         self.source_checks: tuple[SourceCheck, ...] = ()
         families = set(tkfont.families(root))
         self.font_family = next((name for name in ("Microsoft JhengHei UI", "Microsoft JhengHei", "Noto Sans CJK TC", "Arial") if name in families), "TkDefaultFont")
@@ -337,8 +621,14 @@ class ExcessApp:
 
     def _dismiss_dialog(self) -> None:
         if self.dialog is not None:
-            self.dialog.grab_release()
-            self.dialog.destroy()
+            try:
+                self.dialog.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                self.dialog.destroy()
+            except tk.TclError:
+                pass
             self.dialog = None
 
     def _draw_source_icon(self, key: str, y: int, status: str) -> None:
@@ -377,6 +667,82 @@ class ExcessApp:
         if self.running or self.dialog is not None:
             return
         self.customer = customer
+        self.summary_models = None
+        self.include_summary = True
+        self._show_model_selector(customer)
+
+    def _show_model_selector(
+        self,
+        customer: str,
+        *,
+        initial_models: tuple[str, ...] | None = None,
+    ) -> None:
+        self._model_token += 1
+        token = self._model_token
+        dialog = ModelSelectionDialog(
+            self,
+            customer=customer,
+            initial_models=initial_models,
+            on_confirm=self._summary_models_selected,
+            on_skip=self._skip_summary_selection,
+            on_back=self._back_from_model_selection,
+        )
+        self.dialog = dialog
+        self._model_dialog = dialog
+        input_dir = customer_input_dir(self.app_root, customer)
+        events = self.events
+
+        def load_models() -> None:
+            try:
+                models = load_summary_models(input_dir)
+            except Exception as exc:
+                events.put(("models", (token, None, exc)))
+            else:
+                events.put(("models", (token, models, None)))
+
+        threading.Thread(
+            target=load_models,
+            daemon=True,
+            name="excess-model-loader",
+        ).start()
+
+    def _receive_models(self, payload) -> None:
+        token, models, error = payload
+        if token != self._model_token or self.dialog is not getattr(self, "_model_dialog", None):
+            return
+        self._model_dialog.set_models(models, error)
+
+    def _summary_models_selected(self, models: tuple[str, ...] | None) -> None:
+        self.dialog = None  # The selector closes itself before this callback.
+        self._model_token += 1
+        self.summary_models = models
+        self.include_summary = True
+        if self.customer is not None:
+            self._start_checklist(self.customer)
+
+    def _skip_summary_selection(self) -> None:
+        self._dismiss_dialog()
+        self._model_token += 1
+        self.summary_models = None
+        self.include_summary = False
+        if self.customer is not None:
+            self._start_checklist(self.customer)
+
+    def _back_from_model_selection(self) -> None:
+        self._dismiss_dialog()
+        self._model_token += 1
+        self.customer = None
+        self.show_factories()
+
+    def _return_to_model_selection(self) -> None:
+        if self.running or self.dialog is not None:
+            return
+        if self.customer is None:
+            self.show_factories()
+            return
+        self._show_model_selector(self.customer, initial_models=self.summary_models)
+
+    def _start_checklist(self, customer: str) -> None:
         self._reset("checklist")
         self.source_checks = ()
         self._text(78, 239, "來源檔案確認", size=32, bold=True, anchor="w")
@@ -395,7 +761,7 @@ class ExcessApp:
         self.checklist_button.set_state("正在檢查來源檔案…", enabled=False)
         self.rescan_button = self._button(830, 596, "重新掃描檔案", self._refresh_checklist,
                                          width=220, height=54, size=22, primary=False)
-        self._button(135, 596, "← 返回", self.show_factories, width=124, height=42, size=17, primary=False)
+        self._button(135, 596, "← 返回", self._return_to_model_selection, width=124, height=42, size=17, primary=False)
         self._refresh_checklist()
 
     def _refresh_checklist(self, *, start_when_ready: bool = False) -> None:
@@ -491,7 +857,10 @@ class ExcessApp:
     def _show_running(self) -> None:
         self._reset("running")
         self.last_progress = None
-        progress_total = progress_steps_for_customer(self.customer)
+        progress_total = progress_steps_for_customer(
+            self.customer,
+            include_summary=self.include_summary,
+        )
         self._text(78, 226, "STEP 02  /  整理報表", size=17, color=ACCENT, bold=True, anchor="w")
         self.title_item = self._text(78, 266, "正在整理報表", size=36, bold=True, anchor="w")
         self._text(1122, 265, f"工廠  {self.customer}", size=22, color=ACCENT, bold=True, anchor="e")
@@ -527,6 +896,8 @@ class ExcessApp:
             result = generate_report(
                 customer_input_dir(self.app_root, customer), customer_output_file(self.app_root, customer),
                 customer=customer, on_event=self.events.put,
+                summary_models=self.summary_models,
+                include_summary=self.include_summary,
             )
         except Exception as exc:
             self.events.put(("error", exc))
@@ -556,6 +927,9 @@ class ExcessApp:
         kind, payload = event
         if kind == "checklist":
             self._receive_checks(payload)
+            return
+        if kind == "models":
+            self._receive_models(payload)
             return
         self.running = False
         if kind == "success":
@@ -592,6 +966,13 @@ class ExcessApp:
             filenames.append("excess_summary.xlsx")
         filenames.append("incomplete_alternates.xlsx")
         dialog.label("\n".join(filenames), size=20, pady=(0, 16))
+        if self.result and self.result.summary_output_file is None:
+            dialog.label(
+                "本次已略過 summary；若資料夾已有舊版 excess_summary.xlsx，會保留原檔。",
+                size=16,
+                color=MUTED,
+                pady=(0, 12),
+            )
         dialog.label("按「確認」後開啟資料夾，並關閉此程式。", size=18, color=MUTED)
         dialog.buttons("確認", self._finish_success)
         dialog.show(self._finish_success)

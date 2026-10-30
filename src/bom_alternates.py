@@ -106,6 +106,7 @@ class BomAlternates:
     def model_remark_summary(self, parts: list[str]) -> str | None:
         return _join_all(_unique_values(self.model_remarks_by_part, parts))
 
+
     def _best_segment_for(
         self,
         part_no: str,
@@ -126,6 +127,28 @@ class BomAlternates:
                 -segment.row_number,
             ),
         )
+
+
+def load_bom_models(bom_path: Path) -> tuple[str, ...]:
+    """Return distinct, non-empty MODEL values from the BOM sheet."""
+    workbook = load_workbook(bom_path, read_only=True, data_only=True)
+    try:
+        bom_ws = workbook[_find_bom_sheet(workbook)]
+        columns = _detect_bom_columns(bom_ws)
+        if columns.model_remark is None:
+            raise ValueError("Cannot find the BOM MODEL column")
+
+        models_by_key: dict[str, str] = {}
+        for row in bom_ws.iter_rows(
+            min_row=columns.header_row + 1,
+            values_only=True,
+        ):
+            model = _text_or_none(_cell_by_index(row, columns.model_remark))
+            if model:
+                models_by_key.setdefault(model.casefold(), model)
+        return tuple(sorted(models_by_key.values(), key=str.casefold))
+    finally:
+        workbook.close()
 
 
 def load_bom_alternates(
@@ -240,10 +263,10 @@ def load_bom_alternates(
             top_assembly,
             finished_goods,
         )
-        current_component_usage_model = current_model or (
+        current_component_usage_model = (
             _text_or_none(model_remark)
             if component_usage_model_from_bom
-            else None
+            else current_model
         )
         current_finished_good = _text_or_none(top_assembly)
         current_usage_qty = usage_qty

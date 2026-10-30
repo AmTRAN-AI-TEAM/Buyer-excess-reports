@@ -68,7 +68,8 @@ class _TopFiveEntry:
 
 @dataclass(frozen=True)
 class _ProductionSuggestion:
-    target_finished_good: str
+    target_model: str
+    calculation_top_assembly: str
     quantity: int
     consumed_amount: float
     consumed_items: tuple[tuple[int, str, str, float, float], ...]
@@ -87,6 +88,7 @@ def write_excess_summary(
     *,
     component_usages: tuple[BomComponentUsage, ...] = (),
     customer: str | None = None,
+    selected_models: tuple[str, ...] | None = None,
 ) -> tuple[int, int]:
     """Write a model summary and each model's five highest stock amounts.
 
@@ -114,8 +116,14 @@ def write_excess_summary(
         summary.total_amount += metrics.total_amount
 
     workbook = Workbook()
-    summary_ws = workbook.active
-    summary_ws.title = "AVTC Summary"
+    recommendations_ws = workbook.active
+    recommendations_ws.title = "加單建議"
+    summary_sheet_title = (
+        "Raken summary"
+        if customer and customer.upper() == "RAKEN"
+        else "AVTC Summary"
+    )
+    summary_ws = workbook.create_sheet(summary_sheet_title)
     summary_ws["A1"] = f"選取區間：{period_label}"
     summary_headers = list(SUMMARY_HEADERS)
     if customer and customer.upper() == "RAKEN":
@@ -155,11 +163,11 @@ def write_excess_summary(
         elif summary.gating_notes:
             if not _has_usable_component_usage(component_usages):
                 summary.gating_notes.append(
-                    "無法計算加單：BOM 缺少可辨識的 TOP_ASSEMBLY_ITEM 或正數 EXTENDED_QT 用量。"
+                    "無法計算加單：BOM 缺少可辨識的 MODEL、TOP_ASSEMBLY_ITEM 或正數 EXTENDED_QT 用量。"
                 )
             else:
                 summary.gating_notes.append(
-                    "暫不建議加單：Top 5 庫存沒有找到完整相符的 BOM 成品／替代料用料群及正數 EXTENDED_QT，或替代料用量不一致而無法可靠換算。"
+                    "暫不建議加單：Top 5 庫存沒有找到可配對的 BOM MODEL／TOP_ASSEMBLY_ITEM 用料群及正數 EXTENDED_QT，或替代料用量不一致而無法可靠換算。"
                 )
         if summary.gating_notes:
             gating = "\n".join(summary.gating_notes)
@@ -197,6 +205,16 @@ def write_excess_summary(
         ]
     )
     _format_summary_sheet(summary_ws, total_row)
+    _write_recommendations_sheet(
+        recommendations_ws,
+        summaries,
+        suggestions_by_model,
+        period_label,
+        selected_models,
+        summary_headers,
+        recommendable_entries_by_model,
+        top_five_by_model,
+    )
 
     detail_ws = workbook.create_sheet("Top 5明細")
     detail_ws["A1"] = f"每個 MODEL 依最後一期 Excess stock Amount 取前五名：{period_label}"
@@ -283,18 +301,22 @@ def _recommend_production_orders(
             part_names_by_pool[key] = part_names
 
     usage_slots: dict[
-        tuple[str, frozenset[str]],
+        tuple[str, str, frozenset[str]],
         dict[str, Any],
     ] = {}
-    finished_good_names: dict[str, str] = {}
+    model_names: dict[str, str] = {}
+    top_assembly_names: dict[str, str] = {}
     for usage in component_usages:
+        model_name = (usage.model or "").strip()
+        model_key = model_name.casefold()
         finished_good_name = (usage.finished_good or "").strip()
         finished_good_key = finished_good_name.casefold()
         parts = frozenset(_part_key(part) for part in usage.parts if _part_key(part))
-        if not finished_good_key or not parts:
+        if not model_key or not finished_good_key or not parts:
             continue
-        finished_good_names.setdefault(finished_good_key, finished_good_name)
-        slot_key = (finished_good_key, parts)
+        model_names.setdefault(model_key, model_name)
+        top_assembly_names.setdefault(finished_good_key, finished_good_name)
+        slot_key = (model_key, finished_good_key, parts)
         slot = usage_slots.setdefault(
             slot_key,
             {"part_usage": {}, "row_number": usage.row_number},
@@ -310,13 +332,13 @@ def _recommend_production_orders(
             part_usage = slot["part_usage"]
             part_usage[part_key] = part_usage.get(part_key, 0.0) + quantity
 
-    assignments: dict[int, tuple[str, frozenset[str], str, float]] = {}
+    assignments: dict[int, tuple[str, str, frozenset[str], str, float]] = {}
     for pool_key, pool in pools.items():
         primary_part = next(iter(part_names_by_pool[pool_key]), "")
         candidates: list[
-            tuple[float, int, str, int, str, tuple[str, ...], frozenset[str]]
+            tuple[float, int, str, str, int, str, tuple[str, ...], frozenset[str]]
         ] = []
-        for (finished_good_key, slot_parts), slot in usage_slots.items():
+        for (model_key, finished_good_key, slot_parts), slot in usage_slots.items():
             part_usage = slot["part_usage"]
             if not pool.parts.issubset(part_usage):
                 continue
@@ -330,6 +352,7 @@ def _recommend_production_orders(
                     (
                         -quantity,
                         slot["row_number"],
+                        model_key,
                         finished_good_key,
                         0 if matched_part == primary_part else 1,
                         matched_part,
@@ -342,6 +365,7 @@ def _recommend_production_orders(
         (
             negative_usage,
             _row_number,
+            model_key,
             finished_good_key,
             _primary_order,
             matched_part,
@@ -349,6 +373,7 @@ def _recommend_production_orders(
             slot_parts,
         ) = min(candidates)
         assignments[pool_key] = (
+            model_key,
             finished_good_key,
             slot_parts,
             matched_part,
@@ -373,7 +398,13 @@ def _recommend_production_orders(
     }
 
     suggestions_by_model: dict[str, list[_ProductionSuggestion]] = {}
-    for pool_key, (finished_good_key, _slot_parts, matched_part, usage_qty) in assignments.items():
+    for pool_key, (
+        model_key,
+        finished_good_key,
+        _slot_parts,
+        matched_part,
+        usage_qty,
+    ) in assignments.items():
         pool = pools[pool_key]
         if pool.quantity <= 0 or usage_qty <= 0:
             continue
@@ -388,7 +419,8 @@ def _recommend_production_orders(
         )
         suggestions_by_model.setdefault(owner, []).append(
             _ProductionSuggestion(
-                target_finished_good=finished_good_names.get(
+                target_model=model_names.get(model_key, model_key),
+                calculation_top_assembly=top_assembly_names.get(
                     finished_good_key,
                     finished_good_key,
                 ),
@@ -405,7 +437,8 @@ def _recommend_production_orders(
                 key=lambda suggestion: (
                     -suggestion.consumed_amount,
                     suggestion.quantity,
-                    suggestion.target_finished_good.casefold(),
+                    suggestion.target_model.casefold(),
+                    suggestion.calculation_top_assembly.casefold(),
                 ),
             )
         )
@@ -421,17 +454,131 @@ def _suggestion_text(suggestion: _ProductionSuggestion) -> str:
         for rank, part_label, matched_part, quantity, usage_qty in suggestion.consumed_items
     )
     return (
-        f"建議對成品料號 {suggestion.target_finished_good} 加排 {suggestion.quantity:,} 台；"
+        f"建議對 BOM MODEL {suggestion.target_model} 加排 {suggestion.quantity:,} 台；"
         f"依現有 Excess 庫存估算可消耗 USD {int(round(suggestion.consumed_amount)):,}"
-        f"（{used_items}）。"
+        f"（依 TOP_ASSEMBLY_ITEM {suggestion.calculation_top_assembly} 的 BOM 用量估算；{used_items}）。"
     )
+
+
+def _write_recommendations_sheet(
+    worksheet: Any,
+    summaries: list[_ModelSummary],
+    suggestions_by_source_model: dict[str, tuple[_ProductionSuggestion, ...]],
+    period_label: str,
+    selected_models: tuple[str, ...] | None,
+    headers: list[str],
+    recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]],
+    top_five_by_model: dict[str, list[_TopFiveEntry]],
+) -> None:
+    worksheet["A1"] = (
+        f"選取區間：{period_label}；依 Excess 來源 MODEL 篩選，"
+        "Gating 列 Top 庫存及對應加單建議"
+    )
+    for column, header in enumerate(headers, start=1):
+        worksheet.cell(3, column, header)
+
+    selected_keys = (
+        {model.casefold() for model in selected_models}
+        if selected_models is not None
+        else None
+    )
+    displayed_summaries: list[_ModelSummary] = []
+    displayed_source_models: set[str] = set()
+    for summary in summaries:
+        if selected_keys is not None and summary.key.casefold() not in selected_keys:
+            continue
+        displayed_summaries.append(summary)
+        displayed_source_models.add(summary.key.casefold())
+        suggestions = suggestions_by_source_model.get(summary.key, ())
+        ordered_suggestions = tuple(
+            sorted(
+                suggestions,
+                key=lambda suggestion: min(
+                    (rank for rank, *_rest in suggestion.consumed_items),
+                    default=SUMMARY_TOP_LIMIT + 1,
+                ),
+            )
+        )
+        top_entries = recommendable_entries_by_model.get(summary.key) or tuple(
+            top_five_by_model.get(summary.key, ())[:SUMMARY_TOP_LIMIT]
+        )
+        gating_lines = [
+            f"Top {entry.rank}：{entry.source.parts[0] if entry.source.parts else ''} "
+            f"USD {entry.stock_amount:,}"
+            for entry in top_entries
+        ]
+        if ordered_suggestions:
+            gating_lines.append("生產加單建議：")
+            gating_lines.extend(
+                f"{index}.建議對 BOM MODEL {suggestion.target_model} "
+                f"加排 {suggestion.quantity:,} 台。"
+                for index, suggestion in enumerate(ordered_suggestions, start=1)
+            )
+        elif gating_lines:
+            gating_lines.append("目前沒有可配對的加單建議。")
+        gating = "\n".join(gating_lines)
+        order_text = "\n".join(
+            _suggestion_order_text(suggestion)
+            for suggestion in suggestions
+        ) or None
+        worksheet.append(
+            [
+                summary.model,
+                summary.on_hand_qty,
+                summary.opo_qty,
+                summary.on_hand_amount,
+                summary.opo_amount,
+                summary.total_amount,
+                gating,
+                order_text,
+                None,
+            ]
+        )
+
+    if selected_models is not None:
+        for model in selected_models:
+            if model.casefold() in displayed_source_models:
+                continue
+            worksheet.append(
+                [
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    f"{model}：找不到該來源 MODEL 的 Excess 摘要資料。",
+                    None,
+                    None,
+                ]
+            )
+    if worksheet.max_row == 3:
+        worksheet.append(
+            [None, None, None, None, None, None, "目前沒有符合條件的加單建議。", None, None]
+        )
+
+    total_row = worksheet.max_row + 1
+    worksheet.append(
+        [
+            "總計",
+            sum(summary.on_hand_qty for summary in displayed_summaries),
+            sum(summary.opo_qty for summary in displayed_summaries),
+            sum(summary.on_hand_amount for summary in displayed_summaries),
+            sum(summary.opo_amount for summary in displayed_summaries),
+            sum(summary.total_amount for summary in displayed_summaries),
+            None,
+            None,
+            None,
+        ]
+    )
+    _format_summary_sheet(worksheet, total_row)
 
 
 def _suggestion_order_text(suggestion: _ProductionSuggestion) -> str:
     ranks = sorted({rank for rank, *_rest in suggestion.consumed_items})
     rank_text = "、".join(f"Top {rank}" for rank in ranks)
     return (
-        f"{rank_text}：{suggestion.target_finished_good} × {suggestion.quantity:,} 台"
+        f"{rank_text}：{suggestion.target_model} × {suggestion.quantity:,} 台"
     )
 
 
@@ -446,13 +593,16 @@ def _has_usable_component_usage(
     component_usages: tuple[BomComponentUsage, ...],
 ) -> bool:
     return any(
-        usage.finished_good
-        and usage.parts
-        and any(
-            quantity is not None and quantity > 0
-            for _part, quantity in (
-                usage.part_usage_qtys
-                or tuple((part, usage.usage_qty) for part in usage.parts)
+        (
+            usage.model
+            and usage.finished_good
+            and usage.parts
+            and any(
+                quantity is not None and quantity > 0
+                for _part, quantity in (
+                    usage.part_usage_qtys
+                    or tuple((part, usage.usage_qty) for part in usage.parts)
+                )
             )
         )
         for usage in component_usages
@@ -618,7 +768,10 @@ def _format_common_sheet(worksheet: Any, column_count: int, last_row: int) -> No
     for row in range(4, last_row + 1):
         for column in range(1, column_count + 1):
             cell = worksheet.cell(row, column)
-            if column == 1 or (worksheet.title == "AVTC Summary" and column == 7):
+            if column == 1 or (
+                worksheet.title in {"AVTC Summary", "Raken summary", "加單建議"}
+                and column == 7
+            ):
                 cell.alignment = Alignment(
                     horizontal="left",
                     vertical="center",
