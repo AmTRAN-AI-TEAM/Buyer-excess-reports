@@ -40,6 +40,7 @@ DETAIL_TAIL_HEADERS = [
 UNCLASSIFIED_MODEL = "未分類（MODEL空白）"
 TOP_FIVE_LIMIT = 5
 SUMMARY_TOP_LIMIT = 2
+GATING_RECOMMENDATION_MARKER = "（此料號對應加單機種建議）"
 
 
 @dataclass
@@ -128,6 +129,8 @@ def write_excess_summary(
     summary_headers = list(SUMMARY_HEADERS)
     if customer and customer.upper() == "RAKEN":
         summary_headers[0] = "Raken"
+        summary_headers[7] = "Raken建议加单"
+        summary_headers[8] = "Raken 呆滯 预计TO-BE"
     for column, header in enumerate(summary_headers, start=1):
         summary_ws.cell(3, column, header)
 
@@ -149,10 +152,21 @@ def write_excess_summary(
         summary_top_entries = recommendable_entries_by_model.get(summary.key) or (
             top_five_by_model.get(summary.key, ())[:SUMMARY_TOP_LIMIT]
         )
+        recommendation_ranks = {
+            rank
+            for suggestion in suggestions
+            for rank, *_rest in suggestion.consumed_items
+        }
         for entry in summary_top_entries:
             part_no = entry.source.parts[0] if entry.source.parts else ""
+            recommendation_marker = (
+                GATING_RECOMMENDATION_MARKER
+                if entry.rank in recommendation_ranks
+                else ""
+            )
             summary.gating_notes.append(
                 f"Top {entry.rank}：{part_no} USD {entry.stock_amount:,}"
+                f"{recommendation_marker}"
             )
         gating = ""
         if suggestions:
@@ -383,10 +397,14 @@ def _recommend_production_orders(
     recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]] = {}
     selected_pool_keys: set[int] = set()
     for model, entries in top_five_by_model.items():
+        source_model_key = model.casefold()
         recommendable_entries = tuple(
             entry
             for entry in entries
-            if entry.source_row in assignments
+            if (
+                entry.source_row in assignments
+                and assignments[entry.source_row][0] == source_model_key
+            )
         )[:SUMMARY_TOP_LIMIT]
         if recommendable_entries:
             recommendable_entries_by_model[model] = recommendable_entries
@@ -502,9 +520,19 @@ def _write_recommendations_sheet(
         top_entries = recommendable_entries_by_model.get(summary.key) or tuple(
             top_five_by_model.get(summary.key, ())[:SUMMARY_TOP_LIMIT]
         )
+        recommendation_ranks = {
+            rank
+            for suggestion in suggestions
+            for rank, *_rest in suggestion.consumed_items
+        }
         gating_lines = [
             f"Top {entry.rank}：{entry.source.parts[0] if entry.source.parts else ''} "
             f"USD {entry.stock_amount:,}"
+            + (
+                GATING_RECOMMENDATION_MARKER
+                if entry.rank in recommendation_ranks
+                else ""
+            )
             for entry in top_entries
         ]
         if ordered_suggestions:
