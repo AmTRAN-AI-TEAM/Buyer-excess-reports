@@ -27,6 +27,7 @@ class BomComponentUsage:
     parts: tuple[str, ...]
     usage_qty: float | None
     part_usage_qtys: tuple[tuple[str, float | None], ...] = ()
+    part_usage_rows: tuple[tuple[str, int, float | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,7 @@ def load_bom_alternates(
             tuple[str, ...],
             float | None,
             tuple[tuple[str, float | None], ...],
+            tuple[tuple[str, int, float | None], ...],
         ]
     ] = []
     base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]] = defaultdict(set)
@@ -187,6 +189,7 @@ def load_bom_alternates(
     current_base_row: int | None = None
     current_parts: list[str] = []
     current_part_usage_qtys: list[tuple[str, float | None]] = []
+    current_part_usage_rows: list[tuple[str, int, float | None]] = []
     current_customer: str | None = None
     current_model: str | None = None
     current_component_usage_model: str | None = None
@@ -230,6 +233,7 @@ def load_bom_alternates(
             if current_base and current_context == context:
                 current_parts.append(part_no)
                 current_part_usage_qtys.append((part_no, usage_qty))
+                current_part_usage_rows.append((part_no, row_number, usage_qty))
             continue
 
         base_usage_contexts[part_no].add(context)
@@ -243,6 +247,7 @@ def load_bom_alternates(
                     tuple(current_parts),
                     current_usage_qty,
                     tuple(current_part_usage_qtys),
+                    tuple(current_part_usage_rows),
                 )
             )
         _append_segment(
@@ -259,6 +264,7 @@ def load_bom_alternates(
         current_base_row = row_number
         current_parts = [part_no]
         current_part_usage_qtys = [(part_no, usage_qty)]
+        current_part_usage_rows = [(part_no, row_number, usage_qty)]
         current_customer, current_model = _finished_good_metadata(
             top_assembly,
             finished_goods,
@@ -281,6 +287,7 @@ def load_bom_alternates(
                 tuple(current_parts),
                 current_usage_qty,
                 tuple(current_part_usage_qtys),
+                tuple(current_part_usage_rows),
             )
         )
     _append_segment(
@@ -309,6 +316,7 @@ def load_bom_alternates(
                 usage_qty=usage_qty,
                 part_usage_qtys=tuple(dict.fromkeys(part_usage_qtys))
                 or ((base_part, usage_qty),),
+                part_usage_rows=tuple(part_usage_rows),
             )
             for (
                 row_number,
@@ -318,6 +326,7 @@ def load_bom_alternates(
                 _raw_parts,
                 usage_qty,
                 part_usage_qtys,
+                part_usage_rows,
             ) in raw_component_usages
             if finished_good
         )
