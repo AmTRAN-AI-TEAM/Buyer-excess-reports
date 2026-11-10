@@ -654,7 +654,6 @@ def _gating_rich_text(
             _append_rich_text(
                 rich_text,
                 f"{SELECTED_MODEL_MARKER}：{summary.model}",
-                red=True,
             )
             selected_matches.append((entry, match))
         else:
