@@ -96,6 +96,18 @@ class _InventoryPool:
     quantity: float
 
 
+@dataclass(frozen=True)
+class _BomUsageSlot:
+    model_key: str
+    model_name: str
+    finished_good_key: str
+    finished_good_name: str
+    parts: frozenset[str]
+    part_usage: dict[str, float]
+    bom_rows: tuple[_BomRowDetail, ...]
+    row_number: int
+
+
 def write_excess_summary(
     source_rows: tuple[ExcessSummarySourceRow, ...],
     period_label: str,
@@ -113,7 +125,14 @@ def write_excess_summary(
     """
     output_file.parent.mkdir(parents=True, exist_ok=True)
     summary_by_model: dict[str, _ModelSummary] = {}
-    top_five_by_model = _top_five_entries(source_rows)
+    bom_matches_by_source_row = _bom_matches_by_source_model(
+        source_rows,
+        component_usages,
+    )
+    top_five_by_model = _top_five_entries(
+        source_rows,
+        eligible_source_rows=set(bom_matches_by_source_row),
+    )
 
     for source in source_rows:
         metrics = _last_period_metrics(source)
@@ -155,10 +174,9 @@ def write_excess_summary(
     (
         _recommendable_entries_by_model,
         suggestions_by_model,
-        bom_matches_by_source_row,
     ) = _recommend_production_orders(
         top_five_by_model,
-        component_usages,
+        bom_matches_by_source_row,
     )
     top_five = [
         entry
@@ -233,9 +251,14 @@ def write_excess_summary(
 
 def _top_five_entries(
     source_rows: tuple[ExcessSummarySourceRow, ...],
+    *,
+    eligible_source_rows: set[int] | None = None,
 ) -> dict[str, list[_TopFiveEntry]]:
     candidates_by_model: dict[str, list[tuple[int, int, ExcessSummarySourceRow]]] = {}
     for index, source in enumerate(source_rows):
+        source_row = index + 3
+        if eligible_source_rows is not None and source_row not in eligible_source_rows:
+            continue
         if not source.period_metrics:
             continue
         metrics = source.period_metrics[-1]
@@ -270,17 +293,153 @@ def _top_five_entries(
     return entries_by_model
 
 
+def _bom_usage_slots(
+    component_usages: tuple[BomComponentUsage, ...],
+) -> tuple[_BomUsageSlot, ...]:
+    raw_slots: dict[
+        tuple[str, str, frozenset[str]],
+        dict[str, Any],
+    ] = {}
+    for usage in component_usages:
+        model_name = (usage.model or "").strip()
+        model_key = model_name.casefold()
+        finished_good_name = (usage.finished_good or "").strip()
+        finished_good_key = finished_good_name.casefold()
+        parts = frozenset(_part_key(part) for part in usage.parts if _part_key(part))
+        if not model_key or not finished_good_key or not parts:
+            continue
+
+        slot_key = (model_key, finished_good_key, parts)
+        slot = raw_slots.setdefault(
+            slot_key,
+            {
+                "model_name": model_name,
+                "finished_good_name": finished_good_name,
+                "part_usage": {},
+                "bom_rows": [],
+                "row_number": usage.row_number,
+            },
+        )
+        slot["row_number"] = min(slot["row_number"], usage.row_number)
+        part_usage_rows = usage.part_usage_rows or tuple(
+            (part, usage.row_number, quantity)
+            for part, quantity in (
+                usage.part_usage_qtys
+                or tuple((part, usage.usage_qty) for part in usage.parts)
+            )
+        )
+        for part, row_number, quantity in part_usage_rows:
+            part_key = _part_key(part)
+            if part_key not in parts or quantity is None or quantity <= 0:
+                continue
+            part_usage = slot["part_usage"]
+            part_usage[part_key] = part_usage.get(part_key, 0.0) + float(quantity)
+            slot["bom_rows"].append((row_number, str(part).strip(), float(quantity)))
+
+    return tuple(
+        _BomUsageSlot(
+            model_key=model_key,
+            model_name=slot["model_name"],
+            finished_good_key=finished_good_key,
+            finished_good_name=slot["finished_good_name"],
+            parts=parts,
+            part_usage=slot["part_usage"],
+            bom_rows=tuple(slot["bom_rows"]),
+            row_number=slot["row_number"],
+        )
+        for (model_key, finished_good_key, parts), slot in raw_slots.items()
+    )
+
+
+def _match_source_to_model(
+    source: ExcessSummarySourceRow,
+    model_key: str,
+    usage_slots: tuple[_BomUsageSlot, ...],
+) -> _BomMatch | None:
+    part_names = {
+        _part_key(part): str(part).strip()
+        for part in source.parts
+        if _part_key(part)
+    }
+    pool_parts = frozenset(part_names)
+    if not pool_parts:
+        return None
+    primary_part = next(iter(part_names), "")
+
+    candidates: list[tuple[tuple[Any, ...], str, _BomUsageSlot, float]] = []
+    for slot_index, slot in enumerate(usage_slots):
+        if slot.model_key != model_key or not pool_parts.issubset(slot.part_usage):
+            continue
+        usage_values = {slot.part_usage[part] for part in pool_parts}
+        if len(usage_values) > 1:
+            continue
+        for matched_part in pool_parts:
+            quantity = slot.part_usage[matched_part]
+            sort_key = (
+                -quantity,
+                slot.row_number,
+                0 if matched_part == primary_part else 1,
+                matched_part,
+                slot.finished_good_key,
+                tuple(sorted(slot.parts)),
+                slot_index,
+            )
+            candidates.append((sort_key, matched_part, slot, quantity))
+
+    if not candidates:
+        return None
+    _sort_key, matched_part, slot, usage_qty = min(candidates, key=lambda item: item[0])
+    return _BomMatch(
+        model_key=slot.model_key,
+        target_model=slot.model_name,
+        calculation_top_assembly=slot.finished_good_name,
+        matched_part=matched_part,
+        usage_qty=usage_qty,
+        bom_rows=tuple(
+            row
+            for row in slot.bom_rows
+            if _part_key(row[1]) == matched_part
+        ),
+    )
+
+
+def _bom_matches_by_source_model(
+    source_rows: tuple[ExcessSummarySourceRow, ...],
+    component_usages: tuple[BomComponentUsage, ...],
+) -> dict[int, _BomMatch]:
+    slot_lists_by_model: dict[str, list[_BomUsageSlot]] = {}
+    for slot in _bom_usage_slots(component_usages):
+        slot_lists_by_model.setdefault(slot.model_key, []).append(slot)
+    usage_slots_by_model = {
+        model_key: tuple(slots)
+        for model_key, slots in slot_lists_by_model.items()
+    }
+
+    matches: dict[int, _BomMatch] = {}
+    for index, source in enumerate(source_rows):
+        model_key = _model_key(source.model)
+        if not model_key:
+            continue
+        match = _match_source_to_model(
+            source,
+            model_key.casefold(),
+            usage_slots_by_model.get(model_key.casefold(), ()),
+        )
+        if match is not None:
+            matches[index + 3] = match
+    return matches
+
+
 def _recommend_production_orders(
     top_five_by_model: dict[str, list[_TopFiveEntry]],
-    component_usages: tuple[BomComponentUsage, ...],
+    bom_matches_by_source_row: dict[int, _BomMatch],
 ) -> tuple[
     dict[str, tuple[_TopFiveEntry, ...]],
     dict[str, tuple[_ProductionSuggestion, ...]],
-    dict[int, _BomMatch],
 ]:
-    """Select up to two BOM-matched entries per model and calculate each independently."""
-    if not _has_usable_component_usage(component_usages):
-        return {}, {}, {}
+    """Select up to two model-matched entries per model and calculate each independently."""
+    if not bom_matches_by_source_row:
+        return {}, {}
 
     pools: dict[int, _InventoryPool] = {}
     owner_by_pool: dict[int, str] = {}
@@ -303,102 +462,12 @@ def _recommend_production_orders(
             entries_by_pool[key] = entry
             part_names_by_pool[key] = part_names
 
-    usage_slots: dict[
-        tuple[str, str, frozenset[str]],
-        dict[str, Any],
-    ] = {}
-    model_names: dict[str, str] = {}
-    top_assembly_names: dict[str, str] = {}
-    for usage in component_usages:
-        model_name = (usage.model or "").strip()
-        model_key = model_name.casefold()
-        finished_good_name = (usage.finished_good or "").strip()
-        finished_good_key = finished_good_name.casefold()
-        parts = frozenset(_part_key(part) for part in usage.parts if _part_key(part))
-        if not model_key or not finished_good_key or not parts:
-            continue
-        model_names.setdefault(model_key, model_name)
-        top_assembly_names.setdefault(finished_good_key, finished_good_name)
-        slot_key = (model_key, finished_good_key, parts)
-        slot = usage_slots.setdefault(
-            slot_key,
-            {"part_usage": {}, "bom_rows": [], "row_number": usage.row_number},
-        )
-        slot["row_number"] = min(slot["row_number"], usage.row_number)
-        part_usage_rows = usage.part_usage_rows or tuple(
-            (part, usage.row_number, quantity)
-            for part, quantity in (
-                usage.part_usage_qtys
-                or tuple((part, usage.usage_qty) for part in usage.parts)
-            )
-        )
-        for part, row_number, quantity in part_usage_rows:
-            part_key = _part_key(part)
-            if part_key not in parts or quantity is None or quantity <= 0:
-                continue
-            part_usage = slot["part_usage"]
-            part_usage[part_key] = part_usage.get(part_key, 0.0) + quantity
-            slot["bom_rows"].append((row_number, str(part).strip(), float(quantity)))
-
-    assignments: dict[int, _BomMatch] = {}
-    for pool_key, pool in pools.items():
-        primary_part = next(iter(part_names_by_pool[pool_key]), "")
-        candidates: list[
-            tuple[float, int, str, str, int, str, tuple[str, ...], frozenset[str]]
-        ] = []
-        for (model_key, finished_good_key, slot_parts), slot in usage_slots.items():
-            part_usage = slot["part_usage"]
-            if not pool.parts.issubset(part_usage):
-                continue
-            matched_parts = pool.parts
-            usage_values = {part_usage[part] for part in matched_parts}
-            if len(usage_values) > 1:
-                continue
-            for matched_part in matched_parts:
-                quantity = part_usage[matched_part]
-                candidates.append(
-                    (
-                        -quantity,
-                        slot["row_number"],
-                        model_key,
-                        finished_good_key,
-                        0 if matched_part == primary_part else 1,
-                        matched_part,
-                        tuple(sorted(slot_parts)),
-                        slot_parts,
-                    )
-                )
-        if not candidates:
-            continue
-        (
-            negative_usage,
-            _row_number,
-            model_key,
-            finished_good_key,
-            _primary_order,
-            matched_part,
-            _slot_parts_order,
-            slot_parts,
-        ) = min(candidates)
-        slot = usage_slots[(model_key, finished_good_key, slot_parts)]
-        bom_rows = tuple(
-            row
-            for row in slot["bom_rows"]
-            if _part_key(row[1]) == matched_part
-        )
-        assignments[pool_key] = _BomMatch(
-            model_key=model_key,
-            target_model=model_names.get(model_key, model_key),
-            calculation_top_assembly=top_assembly_names.get(
-                finished_good_key,
-                finished_good_key,
-            ),
-            matched_part=matched_part,
-            usage_qty=-negative_usage,
-            bom_rows=bom_rows,
-        )
-
-    bom_matches_by_source_row = dict(assignments)
+    assignments = {
+        entry.source_row: bom_matches_by_source_row[entry.source_row]
+        for entries in top_five_by_model.values()
+        for entry in entries
+        if entry.source_row in bom_matches_by_source_row
+    }
 
     recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]] = {}
     selected_pool_keys: set[int] = set()
@@ -415,14 +484,14 @@ def _recommend_production_orders(
         if recommendable_entries:
             recommendable_entries_by_model[model] = recommendable_entries
             selected_pool_keys.update(entry.source_row for entry in recommendable_entries)
-    assignments = {
+    selected_assignments = {
         pool_key: assignment
         for pool_key, assignment in assignments.items()
         if pool_key in selected_pool_keys
     }
 
     suggestions_by_model: dict[str, list[_ProductionSuggestion]] = {}
-    for pool_key, match in assignments.items():
+    for pool_key, match in selected_assignments.items():
         pool = pools[pool_key]
         if pool.quantity <= 0 or match.usage_qty <= 0:
             continue
@@ -462,7 +531,6 @@ def _recommend_production_orders(
             )
             for model, suggestions in suggestions_by_model.items()
         },
-        bom_matches_by_source_row,
     )
 
 
@@ -690,30 +758,6 @@ def _format_number(value: float) -> str:
 
 def _suggestion_order_text(suggestion: _ProductionSuggestion) -> str:
     return f"建議對BOM MODEL {suggestion.target_model}\n加單{suggestion.quantity}台"
-
-
-def _has_usable_component_usage(
-    component_usages: tuple[BomComponentUsage, ...],
-) -> bool:
-    return any(
-        (
-            usage.model
-            and usage.finished_good
-            and usage.parts
-            and any(
-                quantity is not None and quantity > 0
-                for _part, quantity in (
-                    tuple(
-                        (part, quantity)
-                        for part, _row_number, quantity in usage.part_usage_rows
-                    )
-                    or usage.part_usage_qtys
-                    or tuple((part, usage.usage_qty) for part in usage.parts)
-                )
-            )
-        )
-        for usage in component_usages
-    )
 
 
 def _part_key(value: str) -> str:
