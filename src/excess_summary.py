@@ -634,6 +634,20 @@ def _append_rich_text(
     *,
     red: bool = False,
 ) -> None:
+    # Keep line breaks inside a real text run.  A newline-only TextBlock is
+    # serialized by openpyxl as <t>\n</t> without xml:space="preserve".
+    # Excel may then discard that run when rendering rich text, which makes
+    # the Gating cell appear as one continuous paragraph.  Appending the
+    # whitespace to the preceding run makes openpyxl emit
+    # xml:space="preserve" while retaining the formatting of the preceding
+    # text.  The newline itself is not visible, so inheriting that color does
+    # not affect the displayed result.
+    if text and not text.strip() and rich_text:
+        previous = rich_text[-1]
+        if isinstance(previous, TextBlock):
+            previous.text += text
+            return
+
     rich_text.append(
         TextBlock(
             InlineFont(
