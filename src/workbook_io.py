@@ -74,6 +74,7 @@ class ShortageRecord:
 class ItemMetadata:
     customer: str | None
     model: str | None
+    item_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,20 @@ class ItemWorkbookData:
                 if value
             ]
         )
+
+    def item_type_for(self, part_no: str) -> str | None:
+        item_type = _metadata_value(self.metadata_by_part, part_no, "item_type")
+        if item_type is not None:
+            return item_type
+
+        # BOM matching uses normalized part keys; Item workbooks may preserve
+        # the original casing.  Keep the existing metadata map unchanged and
+        # provide a case-insensitive fallback for TYPE lookup.
+        normalized_part = str(part_no).strip().casefold()
+        for known_part, metadata in self.metadata_by_part.items():
+            if known_part.strip().casefold() == normalized_part:
+                return metadata.item_type
+        return None
 
     def price_for(self, part_no: str) -> float | None:
         return self.prices_by_part.get(part_no)
@@ -326,13 +341,17 @@ def load_item_workbook_data(
     price_headers: tuple[str, ...] = ("Uprice",),
     preferred_cost_sheet: str | None = None,
     fallback_to_first_price_sheet: bool = False,
+    require_type: bool = False,
 ) -> ItemWorkbookData:
     with file_context(item_path, "讀取 Item 資料"):
         workbook = load_workbook(item_path, read_only=True, data_only=True)
         try:
             item_sheet = _find_item_sheet(workbook)
             with file_context(item_path, "讀取 Item 資料", item_sheet):
-                metadata = _load_item_metadata(workbook[item_sheet])
+                metadata = _load_item_metadata(
+                    workbook[item_sheet],
+                    require_type=require_type,
+                )
             preferred_prices: dict[str, float] = {}
             cost_sheet = _find_sheet_or_none(workbook.sheetnames, preferred_cost_sheet) if preferred_cost_sheet else None
             if cost_sheet is not None:
@@ -482,7 +501,11 @@ def _unique_labels(labels: list[str]) -> list[str]:
     return unique
 
 
-def _load_item_metadata(worksheet: Worksheet) -> dict[str, ItemMetadata]:
+def _load_item_metadata(
+    worksheet: Worksheet,
+    *,
+    require_type: bool = False,
+) -> dict[str, ItemMetadata]:
     header_row_number = _find_table_header_row(
         worksheet,
         (ITEM_PART_HEADERS, ("Mps Customer",), ("Mps Model",)),
@@ -496,6 +519,11 @@ def _load_item_metadata(worksheet: Worksheet) -> dict[str, ItemMetadata]:
     item_number = _require_header(headers, *ITEM_PART_HEADERS)
     customer = _require_header(headers, "Mps Customer")
     model = _require_header(headers, "Mps Model")
+    item_type = (
+        _require_header(headers, "TYPE")
+        if require_type
+        else _optional_header(headers, "TYPE")
+    )
 
     metadata: dict[str, ItemMetadata] = {}
     for row in rows:
@@ -505,6 +533,7 @@ def _load_item_metadata(worksheet: Worksheet) -> dict[str, ItemMetadata]:
         metadata[part_no] = ItemMetadata(
             customer=_text_or_none(_cell_by_index(row, customer)),
             model=_text_or_none(_cell_by_index(row, model)),
+            item_type=_text_or_none(_cell_by_index(row, item_type)),
         )
     return metadata
 

@@ -13,6 +13,8 @@ from openpyxl.utils import get_column_letter
 
 from bom_alternates import BomComponentUsage
 from excess_builder import ExcessSummaryMetrics, ExcessSummarySourceRow
+from summary_rules import is_allowed_summary_item_type
+from workbook_io import ItemWorkbookData
 
 
 SUMMARY_HEADERS = [
@@ -116,6 +118,7 @@ def write_excess_summary(
     component_usages: tuple[BomComponentUsage, ...] = (),
     customer: str | None = None,
     selected_models: tuple[str, ...] | None = None,
+    item_data: ItemWorkbookData | None = None,
 ) -> tuple[int, int]:
     """Write a model summary and each model's five highest stock amounts.
 
@@ -128,6 +131,10 @@ def write_excess_summary(
     bom_matches_by_source_row = _bom_matches_by_source_model(
         source_rows,
         component_usages,
+    )
+    bom_matches_by_source_row = _filter_bom_matches_by_item_type(
+        bom_matches_by_source_row,
+        item_data,
     )
     top_five_by_model = _top_five_entries(
         source_rows,
@@ -190,6 +197,7 @@ def write_excess_summary(
             summary,
             summary_top_entries,
             bom_matches_by_source_row,
+            item_data,
         )
 
         order_text = "\n".join(
@@ -234,6 +242,7 @@ def write_excess_summary(
         summary_headers,
         top_five_by_model,
         bom_matches_by_source_row,
+        item_data,
     )
 
     detail_ws = workbook.create_sheet("Top 5明細")
@@ -247,6 +256,22 @@ def write_excess_summary(
 
     workbook.save(output_file)
     return len(summaries), len(top_five)
+
+
+def _filter_bom_matches_by_item_type(
+    bom_matches_by_source_row: dict[int, _BomMatch],
+    item_data: ItemWorkbookData | None,
+) -> dict[int, _BomMatch]:
+    """Keep BOM matches whose actual matched part has an allowed Item TYPE."""
+    if item_data is None:
+        return {}
+
+    filtered: dict[int, _BomMatch] = {}
+    for source_row, match in bom_matches_by_source_row.items():
+        item_type = item_data.item_type_for(match.matched_part)
+        if is_allowed_summary_item_type(item_type):
+            filtered[source_row] = match
+    return filtered
 
 
 def _top_five_entries(
@@ -543,6 +568,7 @@ def _write_recommendations_sheet(
     headers: list[str],
     top_five_by_model: dict[str, list[_TopFiveEntry]],
     bom_matches_by_source_row: dict[int, _BomMatch],
+    item_data: ItemWorkbookData | None,
 ) -> None:
     worksheet["A1"] = (
         f"選取區間：{period_label}；依 Excess 來源 MODEL 篩選，"
@@ -569,6 +595,7 @@ def _write_recommendations_sheet(
             summary,
             top_entries,
             bom_matches_by_source_row,
+            item_data,
         )
         order_text = "\n".join(
             _suggestion_order_text(suggestion)
@@ -631,6 +658,7 @@ def _gating_rich_text(
     summary: _ModelSummary,
     top_entries: tuple[_TopFiveEntry, ...],
     bom_matches_by_source_row: dict[int, _BomMatch],
+    item_data: ItemWorkbookData | None,
 ) -> CellRichText | None:
     if not top_entries:
         return None
@@ -641,11 +669,17 @@ def _gating_rich_text(
         if index:
             _append_rich_text(rich_text, "\n")
         part_text = entry.source.parts[0] if entry.source.parts else ""
+        match = bom_matches_by_source_row.get(entry.source_row)
+        item_type = (
+            item_data.item_type_for(match.matched_part)
+            if match is not None and item_data is not None
+            else None
+        )
+        type_suffix = f"（TYPE: {item_type}）" if item_type else ""
         _append_rich_text(
             rich_text,
-            f"Top {entry.rank}：{part_text} USD {entry.stock_amount:,}",
+            f"Top {entry.rank}：{part_text} USD {entry.stock_amount:,}{type_suffix}",
         )
-        match = bom_matches_by_source_row.get(entry.source_row)
         _append_rich_text(rich_text, "\n")
         if match is None:
             _append_rich_text(rich_text, "此料號未找到可辨識的 BOM MODEL")

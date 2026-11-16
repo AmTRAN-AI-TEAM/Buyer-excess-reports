@@ -263,6 +263,7 @@ def generate_report(
                 price_headers=profile.price_headers if profile else ("Uprice",),
                 preferred_cost_sheet=profile.preferred_cost_sheet if profile else None,
                 fallback_to_first_price_sheet=profile.fallback_to_first_price_sheet if profile else False,
+                require_type=customer_code in {"AVTC", "RAKEN"},
             )
 
         progress.step("Read shortage data")
@@ -329,6 +330,7 @@ def generate_report(
                     component_usages=alternates.component_usages,
                     customer=customer_code,
                     selected_models=summary_models,
+                    item_data=item_data,
                 )
             progress.message(f"Excess summary models: {model_count}")
             progress.message(f"Per-model stock-amount top rows: {top_five_count}")
