@@ -191,4 +191,6 @@ python3 src/main.py --input-dir /path/to/input --output-file /path/to/excess_rep
 python3 src/main.py --customer RAKEN --no-progress
 ```
 
-Excess summary 的最新顯示規則：RAKEN 與 AVTC 的 Gating 顯示每個 MODEL 的 Top 1～Top 3，每個 Top 都標示對應的 BOM MODEL；符合使用者所選 model 的料號以紅字標示「此料號對應使用者所選model：<MODEL>」，並在空白一列後顯示「建議邏輯」、對應 BOM 列、`EXTENDED_QT` 使用量及計算方式，不再於 Gating 顯示加單建議；`Raken建议加单` 與 `AVTC建议加单` 欄使用「建議對BOM MODEL <MODEL>加單<數量>台」格式。
+Excess summary 的最新顯示規則：RAKEN 與 AVTC 的 Gating 顯示每個 MODEL 的 Top 1～Top 3、庫存金額、TYPE 與 BOM MODEL 對應關係；若有可配對的所選 model，Top 1～Top 3 下方保留「建議邏輯」，列出 BOM MODEL、TOP_ASSEMBLY_ITEM、BOM 列、EXTENDED_QT（多列時顯示加總）及 Excess stock QTY ÷ EXTENDED_QT 後向上取整的計算方式。新的加單消耗與供料明細不塞入 Gating。摘要頁新增 `消耗率`、建議料號可消耗金額、所有相關料號原有 Excess USD（加單前）、所有相關料號可消耗金額、加單後剩餘 Excess、料號供應狀態及需額外採購欄位；`所有相關料號原有 Excess USD（加單前）` 為消耗率分母，並等於所有相關料號可消耗 USD 加上加單後剩餘 Excess USD。`Raken建议加单` 與 `AVTC建议加单` 欄以建議編號對應每筆建議。
+
+`excess_summary.xlsx` 另新增 `消耗建議` 與 `供料明細` 工作表。`消耗建議` 每筆建議一列，列出 BOM MODEL、TOP_ASSEMBLY_ITEM、加單台數、消耗率、所有相關料號原有 Excess USD（加單前）、可消耗金額與剩餘金額；不足摘要以「共 N 筆料號／替代料群不足」呈現，實際採購數量仍以 `供料明細` 的「需額外採購數量」欄位為準。`供料明細` 逐一列出必要料號／替代料群的每台用量、加單需求、現有 Excess stock QTY、現有 Excess USD、OPO、可消耗數量、需額外採購數量及剩餘 Excess。每筆建議獨立計算，OPO 僅作為參考，不納入現有 Excess 消耗率；RAKEN 沿用扣除 `others demand` 後的 Excess stock QTY。

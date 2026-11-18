@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
 from pathlib import Path
 import unicodedata
@@ -26,7 +26,50 @@ SUMMARY_HEADERS = [
     "TTL AMT",
     "Gating",
     "AVTC建议加单",
-    "AVTC 呆滞 预计TO-BE",
+    "消耗率",
+    "建議料號可消耗\nUSD",
+    "所有相關料號原有\nExcess USD（加單前）",
+    "所有相關料號可消耗\nUSD",
+    "加單後剩餘\nExcess USD",
+    "料號供應狀態",
+    "需額外採購",
+    "AVTC 呆滯 预计TO-BE",
+]
+CONSUMPTION_HEADERS = [
+    "建議編號",
+    "Excess來源 MODEL",
+    "BOM MODEL",
+    "TOP_ASSEMBLY_ITEM",
+    "Top排名",
+    "觸發料號／替代料群",
+    "建議加單台數",
+    "建議料號可消耗 USD",
+    "所有相關料號原有 Excess USD（加單前）",
+    "所有相關料號可消耗 USD",
+    "加單後剩餘 Excess USD",
+    "消耗率",
+    "料號供應狀態",
+    "需額外採購摘要",
+    "計算說明",
+]
+SUPPLY_DETAIL_HEADERS = [
+    "建議編號",
+    "BOM MODEL",
+    "TOP_ASSEMBLY_ITEM",
+    "必要料號／替代料群",
+    "對應 BOM 列",
+    "每台用量",
+    "加單需求量",
+    "現有 Excess stock QTY",
+    "現有 Excess USD",
+    "現有 OPO QTY",
+    "可消耗數量",
+    "需額外採購數量",
+    "加單後剩餘 QTY",
+    "單價（USD）",
+    "可消耗金額 USD",
+    "剩餘 Excess USD",
+    "判定",
 ]
 DETAIL_FIXED_HEADERS = [
     "排名",
@@ -80,22 +123,51 @@ class _BomMatch:
     matched_part: str
     usage_qty: float
     bom_rows: tuple[_BomRowDetail, ...]
+    slot_key: tuple[str, str, frozenset[str]]
+
+
+@dataclass(frozen=True)
+class _InventoryAllocation:
+    source_row: int
+    source: ExcessSummarySourceRow
+
+
+@dataclass(frozen=True)
+class _MaterialCheck:
+    parts: tuple[str, ...]
+    bom_rows: tuple[_BomRowDetail, ...]
+    usage_qty: float
+    required_qty: float
+    available_qty: float
+    po_qty: float
+    consumed_qty: float
+    extra_purchase_qty: float
+    remaining_qty: float
+    available_amount: float | None
+    consumed_amount: float | None
+    remaining_amount: float | None
+    price: float | None
+    status: str
+    note: str | None = None
 
 
 @dataclass(frozen=True)
 class _ProductionSuggestion:
+    suggestion_id: str
     target_model: str
     calculation_top_assembly: str
     quantity: int
-    consumed_amount: float
-    consumed_items: tuple[tuple[int, str, str, float, float], ...]
+    source_rank: int
+    trigger_parts: tuple[str, ...]
+    trigger_consumed_amount: float | None
+    total_available_amount: float | None
+    total_consumed_amount: float | None
+    total_remaining_amount: float | None
+    consumption_rate: float | None
+    supply_status: str
+    shortage_details: tuple[str, ...]
+    material_checks: tuple[_MaterialCheck, ...]
     bom_rows: tuple[_BomRowDetail, ...] = ()
-
-
-@dataclass
-class _InventoryPool:
-    parts: frozenset[str]
-    quantity: float
 
 
 @dataclass(frozen=True)
@@ -128,18 +200,19 @@ def write_excess_summary(
     """
     output_file.parent.mkdir(parents=True, exist_ok=True)
     summary_by_model: dict[str, _ModelSummary] = {}
-    bom_matches_by_source_row = _bom_matches_by_source_model(
+    all_bom_matches_by_source_row = _bom_matches_by_source_model(
         source_rows,
         component_usages,
     )
-    bom_matches_by_source_row = _filter_bom_matches_by_item_type(
-        bom_matches_by_source_row,
+    eligible_bom_matches_by_source_row = _filter_bom_matches_by_item_type(
+        all_bom_matches_by_source_row,
         item_data,
     )
     top_five_by_model = _top_five_entries(
         source_rows,
-        eligible_source_rows=set(bom_matches_by_source_row),
+        eligible_source_rows=set(eligible_bom_matches_by_source_row),
     )
+    usage_slots = _bom_usage_slots(component_usages)
 
     for source in source_rows:
         metrics = _last_period_metrics(source)
@@ -170,7 +243,7 @@ def write_excess_summary(
     if customer and customer.upper() == "RAKEN":
         summary_headers[0] = "Raken"
         summary_headers[7] = "Raken建议加单"
-        summary_headers[8] = "Raken 呆滯 预计TO-BE"
+        summary_headers[15] = "Raken 呆滯 预计TO-BE"
     for column, header in enumerate(summary_headers, start=1):
         summary_ws.cell(3, column, header)
 
@@ -183,8 +256,12 @@ def write_excess_summary(
         suggestions_by_model,
     ) = _recommend_production_orders(
         top_five_by_model,
-        bom_matches_by_source_row,
+        source_rows,
+        all_bom_matches_by_source_row,
+        usage_slots,
+        item_data,
     )
+    suggestions_by_model = _number_suggestions(suggestions_by_model)
     top_five = [
         entry
         for summary in summaries
@@ -196,16 +273,11 @@ def write_excess_summary(
         gating = _gating_rich_text(
             summary,
             summary_top_entries,
-            bom_matches_by_source_row,
+            eligible_bom_matches_by_source_row,
             item_data,
         )
-
-        order_text = "\n".join(
-            _suggestion_order_text(suggestion)
-            for suggestion in suggestions
-        ) or None
         summary_ws.append(
-            [
+            _summary_values(
                 summary.model,
                 summary.on_hand_qty,
                 summary.opo_qty,
@@ -213,9 +285,8 @@ def write_excess_summary(
                 summary.opo_amount,
                 summary.total_amount,
                 gating,
-                order_text,
-                None,
-            ]
+                suggestions,
+            )
         )
 
     total_row = summary_ws.max_row + 1
@@ -230,6 +301,13 @@ def write_excess_summary(
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ]
     )
     _format_summary_sheet(summary_ws, total_row)
@@ -241,8 +319,24 @@ def write_excess_summary(
         selected_models,
         summary_headers,
         top_five_by_model,
-        bom_matches_by_source_row,
+        eligible_bom_matches_by_source_row,
         item_data,
+    )
+
+    consumption_ws = workbook.create_sheet("消耗建議")
+    _write_consumption_sheet(
+        consumption_ws,
+        summaries,
+        suggestions_by_model,
+        period_label,
+    )
+
+    supply_ws = workbook.create_sheet("供料明細")
+    _write_supply_detail_sheet(
+        supply_ws,
+        summaries,
+        suggestions_by_model,
+        period_label,
     )
 
     detail_ws = workbook.create_sheet("Top 5明細")
@@ -425,6 +519,7 @@ def _match_source_to_model(
             for row in slot.bom_rows
             if _part_key(row[1]) == matched_part
         ),
+        slot_key=(slot.model_key, slot.finished_good_key, slot.parts),
     )
 
 
@@ -457,35 +552,32 @@ def _bom_matches_by_source_model(
 
 def _recommend_production_orders(
     top_five_by_model: dict[str, list[_TopFiveEntry]],
+    source_rows: tuple[ExcessSummarySourceRow, ...],
     bom_matches_by_source_row: dict[int, _BomMatch],
+    usage_slots: tuple[_BomUsageSlot, ...],
+    item_data: ItemWorkbookData | None,
 ) -> tuple[
     dict[str, tuple[_TopFiveEntry, ...]],
     dict[str, tuple[_ProductionSuggestion, ...]],
 ]:
-    """Select up to two model-matched entries per model and calculate each independently."""
+    """Select up to two entries per model and calculate each independently."""
     if not bom_matches_by_source_row:
         return {}, {}
 
-    pools: dict[int, _InventoryPool] = {}
-    owner_by_pool: dict[int, str] = {}
-    entries_by_pool: dict[int, _TopFiveEntry] = {}
-    part_names_by_pool: dict[int, dict[str, str]] = {}
-    for source_model, entries in top_five_by_model.items():
-        for entry in entries:
-            key = entry.source_row
-            quantity = max(entry.stock_qty, 0)
-            part_names = {
-                _part_key(part): str(part).strip()
-                for part in entry.source.parts
-                if _part_key(part)
-            }
-            parts = frozenset(part_names)
-            if quantity <= 0 or not parts:
-                continue
-            pools[key] = _InventoryPool(parts, float(quantity))
-            owner_by_pool[key] = source_model
-            entries_by_pool[key] = entry
-            part_names_by_pool[key] = part_names
+    source_by_row = {
+        index + 3: source
+        for index, source in enumerate(source_rows)
+    }
+    allocations_by_slot: dict[
+        tuple[str, str, frozenset[str]],
+        list[_InventoryAllocation],
+    ] = {}
+    for source_row, match in bom_matches_by_source_row.items():
+        source = source_by_row.get(source_row)
+        if source is not None:
+            allocations_by_slot.setdefault(match.slot_key, []).append(
+                _InventoryAllocation(source_row, source)
+            )
 
     assignments = {
         entry.source_row: bom_matches_by_source_row[entry.source_row]
@@ -495,7 +587,6 @@ def _recommend_production_orders(
     }
 
     recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]] = {}
-    selected_pool_keys: set[int] = set()
     for model, entries in top_five_by_model.items():
         source_model_key = model.casefold()
         recommendable_entries = tuple(
@@ -508,34 +599,78 @@ def _recommend_production_orders(
         )[:SUMMARY_TOP_LIMIT]
         if recommendable_entries:
             recommendable_entries_by_model[model] = recommendable_entries
-            selected_pool_keys.update(entry.source_row for entry in recommendable_entries)
-    selected_assignments = {
-        pool_key: assignment
-        for pool_key, assignment in assignments.items()
-        if pool_key in selected_pool_keys
-    }
 
     suggestions_by_model: dict[str, list[_ProductionSuggestion]] = {}
-    for pool_key, match in selected_assignments.items():
-        pool = pools[pool_key]
-        if pool.quantity <= 0 or match.usage_qty <= 0:
+    for entry in (
+        entry
+        for entries in recommendable_entries_by_model.values()
+        for entry in entries
+    ):
+        match = assignments[entry.source_row]
+        if entry.stock_qty <= 0 or match.usage_qty <= 0:
             continue
-        entry = entries_by_pool[pool_key]
-        owner = owner_by_pool[pool_key]
-        consumed_item = (
-            entry.rank,
-            "／".join(entry.source.parts),
-            part_names_by_pool[pool_key].get(match.matched_part, match.matched_part),
-            pool.quantity,
-            match.usage_qty,
+
+        quantity = ceil(entry.stock_qty / match.usage_qty)
+        scenario_slots = tuple(
+            slot
+            for slot in usage_slots
+            if (
+                slot.model_key == match.model_key
+                and slot.finished_good_key
+                == match.slot_key[1]
+            )
         )
+        material_checks = _material_checks_for_scenario(
+            scenario_slots,
+            allocations_by_slot,
+            quantity,
+            item_data,
+        )
+        trigger_consumed_amount = _source_amount_for_consumed_qty(
+            entry.source,
+            min(max(entry.stock_qty, 0), quantity * match.usage_qty),
+        )
+        total_available_amount = _sum_optional_amount(
+            check.available_amount for check in material_checks
+        )
+        total_consumed_amount = _sum_optional_amount(
+            check.consumed_amount for check in material_checks
+        )
+        total_remaining_amount = _sum_optional_amount(
+            check.remaining_amount for check in material_checks
+        )
+        consumption_rate = (
+            None
+            if (
+                total_available_amount is None
+                or total_consumed_amount is None
+                or total_available_amount <= 0
+            )
+            else total_consumed_amount / total_available_amount
+        )
+        shortages = tuple(
+            f"{_display_parts(check.parts)} +{_format_number(check.extra_purchase_qty)}"
+            for check in material_checks
+            if check.extra_purchase_qty > 1e-9
+        )
+        supply_status = "不足" if shortages else "足夠"
+        owner = _model_key(entry.source.model) or ""
         suggestions_by_model.setdefault(owner, []).append(
             _ProductionSuggestion(
+                suggestion_id="",
                 target_model=match.target_model,
                 calculation_top_assembly=match.calculation_top_assembly,
-                quantity=ceil(pool.quantity / match.usage_qty),
-                consumed_amount=entry.stock_amount,
-                consumed_items=(consumed_item,),
+                quantity=quantity,
+                source_rank=entry.rank,
+                trigger_parts=tuple(entry.source.parts),
+                trigger_consumed_amount=trigger_consumed_amount,
+                total_available_amount=total_available_amount,
+                total_consumed_amount=total_consumed_amount,
+                total_remaining_amount=total_remaining_amount,
+                consumption_rate=consumption_rate,
+                supply_status=supply_status,
+                shortage_details=shortages,
+                material_checks=material_checks,
                 bom_rows=match.bom_rows,
             )
         )
@@ -547,7 +682,11 @@ def _recommend_production_orders(
                 sorted(
                     suggestions,
                     key=lambda suggestion: (
-                        -suggestion.consumed_amount,
+                        -(
+                            suggestion.trigger_consumed_amount
+                            if suggestion.trigger_consumed_amount is not None
+                            else -1
+                        ),
                         suggestion.quantity,
                         suggestion.target_model.casefold(),
                         suggestion.calculation_top_assembly.casefold(),
@@ -557,6 +696,341 @@ def _recommend_production_orders(
             for model, suggestions in suggestions_by_model.items()
         },
     )
+
+
+def _material_checks_for_scenario(
+    scenario_slots: tuple[_BomUsageSlot, ...],
+    allocations_by_slot: dict[
+        tuple[str, str, frozenset[str]],
+        list[_InventoryAllocation],
+    ],
+    order_quantity: int,
+    item_data: ItemWorkbookData | None,
+) -> tuple[_MaterialCheck, ...]:
+    checks: list[_MaterialCheck] = []
+    for slot in sorted(scenario_slots, key=lambda item: item.row_number):
+        usage_qty, usage_note = _slot_usage_qty(slot)
+        if usage_qty <= 0:
+            continue
+        allocations = allocations_by_slot.get(
+            (slot.model_key, slot.finished_good_key, slot.parts),
+            [],
+        )
+        required_qty = order_quantity * usage_qty
+        available_qty = sum(
+            max(_last_period_metrics(allocation.source).stock_qty, 0)
+            for allocation in allocations
+        )
+        po_qty = sum(
+            max(_last_period_metrics(allocation.source).po_qty, 0)
+            for allocation in allocations
+        )
+        remaining_need = required_qty
+        consumed_qty = 0.0
+        consumed_amounts: list[float | None] = []
+        remaining_amounts: list[float | None] = []
+        available_amounts: list[float | None] = []
+        for allocation in allocations:
+            metrics = _last_period_metrics(allocation.source)
+            source_qty = max(metrics.stock_qty, 0)
+            consumed_from_source = min(source_qty, max(remaining_need, 0))
+            remaining_need -= consumed_from_source
+            consumed_qty += consumed_from_source
+            available_amounts.append(
+                metrics.stock_amount if source_qty > 0 else 0.0
+            )
+            consumed_amounts.append(
+                _source_amount_for_consumed_qty(
+                    allocation.source,
+                    consumed_from_source,
+                )
+            )
+            remaining_amounts.append(
+                _source_amount_for_consumed_qty(
+                    allocation.source,
+                    max(source_qty - consumed_from_source, 0),
+                )
+            )
+
+        if not allocations:
+            available_amount = 0.0
+            consumed_amount = 0.0
+            remaining_amount = 0.0
+        else:
+            available_amount = _sum_optional_amount(available_amounts)
+            consumed_amount = _sum_optional_amount(consumed_amounts)
+            remaining_amount = _sum_optional_amount(remaining_amounts)
+
+        extra_purchase_qty = max(required_qty - available_qty, 0)
+        remaining_qty = max(available_qty - required_qty, 0)
+        note_parts: list[str] = []
+        if not allocations:
+            note_parts.append("找不到此必要料號的 Excess 來源")
+        if usage_note:
+            note_parts.append(usage_note)
+        if any(
+            amount is None
+            for amount in (*available_amounts, *consumed_amounts, *remaining_amounts)
+        ):
+            note_parts.append("缺少單價，USD 金額無法完整計算")
+        price = next(
+            (
+                allocation.source.price
+                for allocation in allocations
+                if allocation.source.price is not None
+            ),
+            _fallback_price_for_parts(item_data, slot.parts),
+        )
+        checks.append(
+            _MaterialCheck(
+                parts=tuple(sorted(slot.parts)),
+                bom_rows=slot.bom_rows,
+                usage_qty=usage_qty,
+                required_qty=required_qty,
+                available_qty=available_qty,
+                po_qty=po_qty,
+                consumed_qty=consumed_qty,
+                extra_purchase_qty=extra_purchase_qty,
+                remaining_qty=remaining_qty,
+                available_amount=available_amount,
+                consumed_amount=consumed_amount,
+                remaining_amount=remaining_amount,
+                price=price,
+                status="不足" if extra_purchase_qty > 1e-9 else "足夠",
+                note="；".join(note_parts) or None,
+            )
+        )
+    return tuple(checks)
+
+
+def _slot_usage_qty(slot: _BomUsageSlot) -> tuple[float, str | None]:
+    values = tuple(value for value in slot.part_usage.values() if value > 0)
+    if not values:
+        return 0.0, "BOM 缺少有效 EXTENDED_QT"
+    if len({round(value, 9) for value in values}) == 1:
+        return values[0], None
+    return max(values), "替代料 EXTENDED_QT 不一致，採用較高用量"
+
+
+def _source_amount_for_consumed_qty(
+    source: ExcessSummarySourceRow,
+    consumed_qty: float,
+) -> float | None:
+    metrics = _last_period_metrics(source)
+    source_qty = max(metrics.stock_qty, 0)
+    if consumed_qty <= 0:
+        return 0.0
+    if source_qty <= 0:
+        return 0.0
+    if metrics.stock_amount is None:
+        return None
+    return metrics.stock_amount * min(consumed_qty, source_qty) / source_qty
+
+
+def _sum_optional_amount(values: Any) -> float | None:
+    values = tuple(values)
+    if any(value is None for value in values):
+        return None
+    return sum(float(value) for value in values)
+
+
+def _fallback_price_for_parts(
+    item_data: ItemWorkbookData | None,
+    parts: frozenset[str],
+) -> float | None:
+    if item_data is None:
+        return None
+    price_by_key = {
+        str(part).strip().casefold(): price
+        for part, price in item_data.prices_by_part.items()
+    }
+    for part in sorted(parts):
+        price = price_by_key.get(part.casefold())
+        if price is not None:
+            return price
+    return None
+
+
+def _number_suggestions(
+    suggestions_by_model: dict[str, tuple[_ProductionSuggestion, ...]],
+) -> dict[str, tuple[_ProductionSuggestion, ...]]:
+    counter = 1
+    numbered: dict[str, tuple[_ProductionSuggestion, ...]] = {}
+    for model, suggestions in suggestions_by_model.items():
+        model_suggestions: list[_ProductionSuggestion] = []
+        for suggestion in suggestions:
+            model_suggestions.append(
+                replace(suggestion, suggestion_id=f"S{counter:03d}")
+            )
+            counter += 1
+        numbered[model] = tuple(model_suggestions)
+    return numbered
+
+
+def _summary_values(
+    model: str,
+    on_hand_qty: int,
+    opo_qty: int,
+    on_hand_amount: int,
+    opo_amount: int,
+    total_amount: int,
+    gating: CellRichText | None,
+    suggestions: tuple[_ProductionSuggestion, ...],
+) -> list[Any]:
+    return [
+        model,
+        on_hand_qty,
+        opo_qty,
+        on_hand_amount,
+        opo_amount,
+        total_amount,
+        gating,
+        _suggestion_lines(suggestions, _suggestion_order_text),
+        _suggestion_lines(suggestions, _suggestion_rate_text),
+        _suggestion_lines(suggestions, _suggestion_trigger_amount_text),
+        _suggestion_lines(suggestions, _suggestion_total_available_text),
+        _suggestion_lines(suggestions, _suggestion_total_consumed_text),
+        _suggestion_lines(suggestions, _suggestion_remaining_text),
+        _suggestion_lines(suggestions, lambda suggestion: suggestion.supply_status),
+        _suggestion_lines(suggestions, _suggestion_shortage_text),
+        None,
+    ]
+
+
+def _suggestion_lines(
+    suggestions: tuple[_ProductionSuggestion, ...],
+    formatter: Any,
+) -> str | None:
+    if not suggestions:
+        return None
+    return "\n".join(
+        f"{suggestion.suggestion_id}｜{formatter(suggestion)}"
+        for suggestion in suggestions
+    )
+
+
+def _suggestion_rate_text(suggestion: _ProductionSuggestion) -> str:
+    if suggestion.consumption_rate is None:
+        return "無法計算"
+    return f"{suggestion.consumption_rate:.2%}"
+
+
+def _suggestion_trigger_amount_text(suggestion: _ProductionSuggestion) -> str:
+    return _format_usd(suggestion.trigger_consumed_amount)
+
+
+def _suggestion_total_consumed_text(suggestion: _ProductionSuggestion) -> str:
+    return _format_usd(suggestion.total_consumed_amount)
+
+
+def _suggestion_total_available_text(suggestion: _ProductionSuggestion) -> str:
+    return _format_usd(suggestion.total_available_amount)
+
+
+def _suggestion_remaining_text(suggestion: _ProductionSuggestion) -> str:
+    return _format_usd(suggestion.total_remaining_amount)
+
+
+def _suggestion_shortage_text(suggestion: _ProductionSuggestion) -> str:
+    if not suggestion.shortage_details:
+        return "無"
+    preview_limit = 5
+    preview = "；".join(suggestion.shortage_details[:preview_limit])
+    remaining = len(suggestion.shortage_details) - preview_limit
+    if remaining > 0:
+        return (
+            f"共 {len(suggestion.shortage_details)} 筆料號／替代料群不足："
+            f"{preview}；另有 {remaining} 筆，詳見供料明細"
+        )
+    return f"共 {len(suggestion.shortage_details)} 筆料號／替代料群不足：{preview}"
+
+
+def _format_usd(value: float | None) -> str:
+    if value is None:
+        return "無法計算"
+    return f"USD {value:,.2f}"
+
+
+def _write_consumption_sheet(
+    worksheet: Any,
+    summaries: list[_ModelSummary],
+    suggestions_by_model: dict[str, tuple[_ProductionSuggestion, ...]],
+    period_label: str,
+) -> None:
+    worksheet["A1"] = (
+        f"消耗建議：{period_label}；每筆建議獨立計算，庫存基準為最後一期 Excess stock QTY"
+    )
+    for column, header in enumerate(CONSUMPTION_HEADERS, start=1):
+        worksheet.cell(3, column, header)
+    for summary in summaries:
+        for suggestion in suggestions_by_model.get(summary.key, ()):
+            worksheet.append(
+                [
+                    suggestion.suggestion_id,
+                    summary.model,
+                    suggestion.target_model,
+                    suggestion.calculation_top_assembly,
+                    suggestion.source_rank,
+                    _display_parts(suggestion.trigger_parts),
+                    suggestion.quantity,
+                    suggestion.trigger_consumed_amount,
+                    suggestion.total_available_amount,
+                    suggestion.total_consumed_amount,
+                    suggestion.total_remaining_amount,
+                    suggestion.consumption_rate,
+                    suggestion.supply_status,
+                    _suggestion_shortage_text(suggestion),
+                    (
+                        f"Top {suggestion.source_rank} 料號庫存 ÷ BOM 每台用量，"
+                        "向上取整；消耗率 = 所有相關料號可消耗 USD ÷ "
+                        "所有相關料號原有 Excess USD（加單前）；"
+                        "供料檢查請見「供料明細」"
+                    ),
+                ]
+            )
+    _format_consumption_sheet(worksheet, worksheet.max_row)
+
+
+def _write_supply_detail_sheet(
+    worksheet: Any,
+    summaries: list[_ModelSummary],
+    suggestions_by_model: dict[str, tuple[_ProductionSuggestion, ...]],
+    period_label: str,
+) -> None:
+    worksheet["A1"] = (
+        f"供料明細：{period_label}；OPO 僅供參考，不納入現有 Excess 消耗率"
+    )
+    for column, header in enumerate(SUPPLY_DETAIL_HEADERS, start=1):
+        worksheet.cell(3, column, header)
+    for summary in summaries:
+        for suggestion in suggestions_by_model.get(summary.key, ()):
+            for check in suggestion.material_checks:
+                worksheet.append(
+                    [
+                        suggestion.suggestion_id,
+                        suggestion.target_model,
+                        suggestion.calculation_top_assembly,
+                        _display_parts(check.parts),
+                        _format_bom_rows(check.bom_rows),
+                        check.usage_qty,
+                        check.required_qty,
+                        check.available_qty,
+                        check.available_amount,
+                        check.po_qty,
+                        check.consumed_qty,
+                        check.extra_purchase_qty,
+                        check.remaining_qty,
+                        check.price,
+                        check.consumed_amount,
+                        check.remaining_amount,
+                        "；".join(
+                            value
+                            for value in (check.status, check.note)
+                            if value
+                        ),
+                    ]
+                )
+    _format_supply_detail_sheet(worksheet, worksheet.max_row)
 
 
 def _write_recommendations_sheet(
@@ -597,12 +1071,8 @@ def _write_recommendations_sheet(
             bom_matches_by_source_row,
             item_data,
         )
-        order_text = "\n".join(
-            _suggestion_order_text(suggestion)
-            for suggestion in suggestions
-        ) or None
         worksheet.append(
-            [
+            _summary_values(
                 summary.model,
                 summary.on_hand_qty,
                 summary.opo_qty,
@@ -610,9 +1080,8 @@ def _write_recommendations_sheet(
                 summary.opo_amount,
                 summary.total_amount,
                 gating,
-                order_text,
-                None,
-            ]
+                suggestions,
+            )
         )
 
     if selected_models is not None:
@@ -630,11 +1099,35 @@ def _write_recommendations_sheet(
                     f"{model}：找不到該來源 MODEL 的 Excess 摘要資料。",
                     None,
                     None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 ]
             )
     if worksheet.max_row == 3:
         worksheet.append(
-            [None, None, None, None, None, None, "目前沒有符合條件的資料。", None, None]
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "目前沒有符合條件的資料。",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]
         )
 
     total_row = worksheet.max_row + 1
@@ -646,6 +1139,13 @@ def _write_recommendations_sheet(
             sum(summary.on_hand_amount for summary in displayed_summaries),
             sum(summary.opo_amount for summary in displayed_summaries),
             sum(summary.total_amount for summary in displayed_summaries),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -714,11 +1214,11 @@ def _gating_rich_text(
                 rich_text,
                 f"對應 BOM 列：{_format_bom_rows(match.bom_rows)}\n",
             )
+            raw_quantity = entry.stock_qty / match.usage_qty
             _append_rich_text(
                 rich_text,
                 f"EXTENDED_QT 使用量：{_format_bom_usage(match.bom_rows, match.usage_qty)}\n",
             )
-            raw_quantity = entry.stock_qty / match.usage_qty
             _append_rich_text(
                 rich_text,
                 "計算：Excess stock QTY "
@@ -772,14 +1272,12 @@ def _format_bom_rows(rows: tuple[_BomRowDetail, ...]) -> str:
 
 def _format_bom_usage(
     rows: tuple[_BomRowDetail, ...],
-    usage_qty: float,
+    total_usage: float,
 ) -> str:
-    if not rows:
-        return f"合計 {_format_number(usage_qty)} 件/台"
-    quantities = " + ".join(
-        _format_number(quantity) for _row_number, _part, quantity in rows
-    )
-    return f"{quantities} = {_format_number(usage_qty)} 件/台"
+    if len(rows) <= 1:
+        return f"{_format_number(total_usage)} 件/台"
+    quantities = " + ".join(_format_number(row.quantity) for row in rows)
+    return f"{quantities} = {_format_number(total_usage)} 件/台"
 
 
 def _format_number(value: float) -> str:
@@ -790,11 +1288,16 @@ def _format_number(value: float) -> str:
 
 
 def _suggestion_order_text(suggestion: _ProductionSuggestion) -> str:
-    return f"建議對BOM MODEL {suggestion.target_model}\n加單{suggestion.quantity}台"
+    return f"建議對BOM MODEL {suggestion.target_model} 加單{suggestion.quantity}台"
 
 
 def _part_key(value: str) -> str:
     return str(value).strip().casefold()
+
+
+def _display_parts(parts: Any) -> str:
+    values = [str(part).strip() for part in parts if str(part).strip()]
+    return "／".join(values) or "未提供料號"
 
 
 def _last_period_metrics(source: ExcessSummarySourceRow) -> ExcessSummaryMetrics:
@@ -848,7 +1351,7 @@ def _detail_values(entry: _TopFiveEntry, column_count: int) -> list[Any]:
 def _format_summary_sheet(worksheet: Any, total_row: int) -> None:
     _format_common_sheet(worksheet, len(SUMMARY_HEADERS), total_row)
     worksheet.freeze_panes = "A4"
-    worksheet.auto_filter.ref = f"A3:I{total_row - 1}"
+    worksheet.auto_filter.ref = f"A3:{get_column_letter(len(SUMMARY_HEADERS))}{total_row - 1}"
     worksheet.row_dimensions[3].height = 44
     worksheet.column_dimensions["A"].width = 32
     worksheet.column_dimensions["B"].width = 12
@@ -858,20 +1361,23 @@ def _format_summary_sheet(worksheet: Any, total_row: int) -> None:
     worksheet.column_dimensions["F"].width = 14
     worksheet.column_dimensions["G"].width = 64
     worksheet.column_dimensions["H"].width = 30
-    worksheet.column_dimensions["I"].width = 23
+    worksheet.column_dimensions["I"].width = 14
+    worksheet.column_dimensions["J"].width = 22
+    worksheet.column_dimensions["K"].width = 26
+    worksheet.column_dimensions["L"].width = 24
+    worksheet.column_dimensions["M"].width = 22
+    worksheet.column_dimensions["N"].width = 20
+    worksheet.column_dimensions["O"].width = 36
+    worksheet.column_dimensions["P"].width = 23
 
     for row in range(4, total_row):
-        gating_text = worksheet.cell(row, 7).value
-        order_text = worksheet.cell(row, 8).value
-        gating_lines = _wrapped_line_count(
-            gating_text,
-            worksheet.column_dimensions["G"].width or 64,
+        line_count = max(
+            _wrapped_line_count(
+                worksheet.cell(row, column).value,
+                worksheet.column_dimensions[get_column_letter(column)].width or 18,
+            )
+            for column in range(7, 17)
         )
-        order_lines = _wrapped_line_count(
-            order_text,
-            worksheet.column_dimensions["H"].width or 25,
-        )
-        line_count = max(gating_lines, order_lines)
         worksheet.row_dimensions[row].height = max(
             30,
             min(409.5, line_count * 18 + 8),
@@ -881,6 +1387,53 @@ def _format_summary_sheet(worksheet: Any, total_row: int) -> None:
             worksheet.cell(row, column).number_format = "#,##0;[Red]-#,##0;0"
     for cell in worksheet[total_row]:
         cell.font = Font(name="Arial", size=9, bold=True, color="FF0070C0")
+
+
+def _format_consumption_sheet(worksheet: Any, last_row: int) -> None:
+    _format_common_sheet(worksheet, len(CONSUMPTION_HEADERS), last_row)
+    worksheet.freeze_panes = "A4"
+    worksheet.auto_filter.ref = (
+        f"A3:{get_column_letter(len(CONSUMPTION_HEADERS))}{max(last_row, 3)}"
+    )
+    worksheet.row_dimensions[3].height = 44
+    widths = [
+        12, 24, 24, 28, 10, 28, 14, 20, 26, 23, 21, 12, 16, 34, 42
+    ]
+    for column, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(column)].width = width
+    for row in range(4, last_row + 1):
+        worksheet.row_dimensions[row].height = 54
+        for column in (7,):
+            worksheet.cell(row, column).number_format = "#,##0.###;[Red]-#,##0.###;0"
+        for column in (8, 9, 10, 11):
+            worksheet.cell(row, column).number_format = "#,##0.00;[Red]-#,##0.00;0"
+        worksheet.cell(row, 12).number_format = "0.00%"
+        if str(worksheet.cell(row, 13).value).startswith("不足"):
+            worksheet.cell(row, 13).font = Font(name="Arial", size=9, color="FFFF0000")
+
+
+def _format_supply_detail_sheet(worksheet: Any, last_row: int) -> None:
+    _format_common_sheet(worksheet, len(SUPPLY_DETAIL_HEADERS), last_row)
+    worksheet.freeze_panes = "A4"
+    worksheet.auto_filter.ref = (
+        f"A3:{get_column_letter(len(SUPPLY_DETAIL_HEADERS))}{max(last_row, 3)}"
+    )
+    worksheet.row_dimensions[3].height = 44
+    widths = [
+        12, 24, 28, 30, 48, 12, 14, 18, 20, 14, 14, 16, 16, 15, 20, 20, 38
+    ]
+    for column, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(column)].width = width
+    for row in range(4, last_row + 1):
+        worksheet.row_dimensions[row].height = 42
+        for column in (6, 7, 8, 10, 11, 12, 13):
+            worksheet.cell(row, column).number_format = "#,##0.###;[Red]-#,##0.###;0"
+        worksheet.cell(row, 9).number_format = "#,##0.00;[Red]-#,##0.00;0"
+        worksheet.cell(row, 14).number_format = "#,##0.0000;[Red]-#,##0.0000;0"
+        for column in (15, 16):
+            worksheet.cell(row, column).number_format = "#,##0.00;[Red]-#,##0.00;0"
+        if str(worksheet.cell(row, 17).value).startswith("不足"):
+            worksheet.cell(row, 17).font = Font(name="Arial", size=9, color="FFFF0000")
 
 
 def _format_detail_sheet(worksheet: Any, column_count: int, last_row: int) -> None:
@@ -966,7 +1519,7 @@ def _format_common_sheet(worksheet: Any, column_count: int, last_row: int) -> No
             cell = worksheet.cell(row, column)
             if column == 1 or (
                 worksheet.title in {"AVTC Summary", "Raken summary", "加單建議"}
-                and column == 7
+                and column in {7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
             ):
                 cell.alignment = Alignment(
                     horizontal="left",
