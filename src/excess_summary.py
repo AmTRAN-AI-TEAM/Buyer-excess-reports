@@ -1276,7 +1276,10 @@ def _format_bom_usage(
 ) -> str:
     if len(rows) <= 1:
         return f"{_format_number(total_usage)} 件/台"
-    quantities = " + ".join(_format_number(row.quantity) for row in rows)
+    quantities = " + ".join(
+        _format_number(quantity)
+        for _row_number, _part, quantity in rows
+    )
     return f"{quantities} = {_format_number(total_usage)} 件/台"
 
 
