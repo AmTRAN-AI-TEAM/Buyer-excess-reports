@@ -31,7 +31,7 @@ SUMMARY_HEADERS = [
     "所有相關料號原有\nExcess USD（加單前）",
     "所有相關料號可消耗\nUSD",
     "加單後剩餘\nExcess USD",
-    "料號供應狀態",
+    "庫存數量是否可滿足加單",
     "需額外採購",
     "AVTC 呆滯 预计TO-BE",
 ]
@@ -48,7 +48,7 @@ CONSUMPTION_HEADERS = [
     "所有相關料號可消耗 USD",
     "加單後剩餘 Excess USD",
     "消耗率",
-    "料號供應狀態",
+    "庫存數量是否可滿足加單",
     "需額外採購摘要",
     "計算說明",
 ]
@@ -88,7 +88,6 @@ UNCLASSIFIED_MODEL = "未分類（MODEL空白）"
 TOP_FIVE_LIMIT = 5
 SUMMARY_TOP_LIMIT = 2
 GATING_TOP_LIMIT = 3
-SELECTED_MODEL_MARKER = "此料號對應使用者所選model"
 _BomRowDetail = tuple[int, str, float]
 
 
@@ -271,7 +270,6 @@ def write_excess_summary(
         suggestions = suggestions_by_model.get(summary.key, ())
         summary_top_entries = top_five_by_model.get(summary.key, ())[:GATING_TOP_LIMIT]
         gating = _gating_rich_text(
-            summary,
             summary_top_entries,
             eligible_bom_matches_by_source_row,
             item_data,
@@ -339,7 +337,7 @@ def write_excess_summary(
         period_label,
     )
 
-    detail_ws = workbook.create_sheet("Top 5明細")
+    detail_ws = workbook.create_sheet("庫存金額Top5")
     detail_ws["A1"] = f"每個 MODEL 依最後一期 Excess stock Amount 取前五名：{period_label}"
     detail_headers = _detail_headers(top_five)
     for column, header in enumerate(detail_headers, start=1):
@@ -860,7 +858,7 @@ def _number_suggestions(
         model_suggestions: list[_ProductionSuggestion] = []
         for suggestion in suggestions:
             model_suggestions.append(
-                replace(suggestion, suggestion_id=f"S{counter:03d}")
+                replace(suggestion, suggestion_id=f"建議編號{counter}")
             )
             counter += 1
         numbered[model] = tuple(model_suggestions)
@@ -1066,7 +1064,6 @@ def _write_recommendations_sheet(
         suggestions = suggestions_by_source_model.get(summary.key, ())
         top_entries = tuple(top_five_by_model.get(summary.key, ())[:GATING_TOP_LIMIT])
         gating = _gating_rich_text(
-            summary,
             top_entries,
             bom_matches_by_source_row,
             item_data,
@@ -1155,7 +1152,6 @@ def _write_recommendations_sheet(
 
 
 def _gating_rich_text(
-    summary: _ModelSummary,
     top_entries: tuple[_TopFiveEntry, ...],
     bom_matches_by_source_row: dict[int, _BomMatch],
     item_data: ItemWorkbookData | None,
@@ -1164,68 +1160,49 @@ def _gating_rich_text(
         return None
 
     rich_text = CellRichText()
-    selected_matches: list[tuple[_TopFiveEntry, _BomMatch]] = []
+    _append_rich_text(rich_text, "建議邏輯")
     for index, entry in enumerate(top_entries):
-        if index:
-            _append_rich_text(rich_text, "\n")
+        _append_rich_text(rich_text, "\n\n" if index else "\n")
         part_text = entry.source.parts[0] if entry.source.parts else ""
         match = bom_matches_by_source_row.get(entry.source_row)
-        item_type = (
-            item_data.item_type_for(match.matched_part)
-            if match is not None and item_data is not None
-            else None
-        )
-        type_suffix = f"（TYPE: {item_type}）" if item_type else ""
         _append_rich_text(
             rich_text,
-            f"Top {entry.rank}：{part_text} USD {entry.stock_amount:,}{type_suffix}",
+            f"Top {entry.rank} 料號：{part_text} USD {entry.stock_amount:,}\n",
         )
-        _append_rich_text(rich_text, "\n")
         if match is None:
-            _append_rich_text(rich_text, "此料號未找到可辨識的 BOM MODEL")
+            _append_rich_text(rich_text, "未找到可辨識的 BOM MODEL")
             continue
-        if match.model_key == summary.key.casefold():
-            _append_rich_text(
-                rich_text,
-                f"{SELECTED_MODEL_MARKER}：{summary.model}",
-            )
-            selected_matches.append((entry, match))
-        else:
-            _append_rich_text(
-                rich_text,
-                f"此料號對應 BOM MODEL：{match.target_model}",
-            )
-
-    if selected_matches:
-        _append_rich_text(rich_text, "\n\n建議邏輯")
-        for index, (entry, match) in enumerate(selected_matches):
-            _append_rich_text(rich_text, "\n\n" if index else "\n")
-            part_text = entry.source.parts[0] if entry.source.parts else ""
-            _append_rich_text(rich_text, f"Top {entry.rank} 料號：{part_text}\n")
-            _append_rich_text(
-                rich_text,
-                f"對應 BOM MODEL：{match.target_model}\n",
-            )
-            _append_rich_text(
-                rich_text,
-                f"對應 TOP_ASSEMBLY_ITEM：{match.calculation_top_assembly}\n",
-            )
-            _append_rich_text(
-                rich_text,
-                f"對應 BOM 列：{_format_bom_rows(match.bom_rows)}\n",
-            )
-            raw_quantity = entry.stock_qty / match.usage_qty
-            _append_rich_text(
-                rich_text,
-                f"EXTENDED_QT 使用量：{_format_bom_usage(match.bom_rows, match.usage_qty)}\n",
-            )
-            _append_rich_text(
-                rich_text,
-                "計算：Excess stock QTY "
-                f"{_format_number(entry.stock_qty)} ÷ EXTENDED_QT "
-                f"{_format_number(match.usage_qty)} = {_format_number(raw_quantity)} 台，"
-                f"向上取整為 {ceil(raw_quantity)} 台",
-            )
+        item_type = (
+            item_data.item_type_for(match.matched_part)
+            if item_data is not None
+            else None
+        )
+        if item_type:
+            _append_rich_text(rich_text, f"TYPE：{item_type}\n")
+        _append_rich_text(
+            rich_text,
+            f"對應 BOM MODEL：{match.target_model}\n",
+        )
+        _append_rich_text(
+            rich_text,
+            f"對應 TOP_ASSEMBLY_ITEM：{match.calculation_top_assembly}\n",
+        )
+        _append_rich_text(
+            rich_text,
+            f"對應 BOM 列：{_format_bom_rows(match.bom_rows)}\n",
+        )
+        raw_quantity = entry.stock_qty / match.usage_qty
+        _append_rich_text(
+            rich_text,
+            f"EXTENDED_QT 使用量：{_format_bom_usage(match.bom_rows, match.usage_qty)}\n",
+        )
+        _append_rich_text(
+            rich_text,
+            "計算：Excess stock QTY "
+            f"{_format_number(entry.stock_qty)} ÷ EXTENDED_QT "
+            f"{_format_number(match.usage_qty)} = {_format_number(raw_quantity)} 台，"
+            f"向上取整為 {ceil(raw_quantity)} 台",
+        )
     return rich_text
 
 
@@ -1355,7 +1332,7 @@ def _format_summary_sheet(worksheet: Any, total_row: int) -> None:
     _format_common_sheet(worksheet, len(SUMMARY_HEADERS), total_row)
     worksheet.freeze_panes = "A4"
     worksheet.auto_filter.ref = f"A3:{get_column_letter(len(SUMMARY_HEADERS))}{total_row - 1}"
-    worksheet.row_dimensions[3].height = 44
+    worksheet.row_dimensions[3].height = 58
     worksheet.column_dimensions["A"].width = 32
     worksheet.column_dimensions["B"].width = 12
     worksheet.column_dimensions["C"].width = 12
@@ -1369,7 +1346,7 @@ def _format_summary_sheet(worksheet: Any, total_row: int) -> None:
     worksheet.column_dimensions["K"].width = 26
     worksheet.column_dimensions["L"].width = 24
     worksheet.column_dimensions["M"].width = 22
-    worksheet.column_dimensions["N"].width = 20
+    worksheet.column_dimensions["N"].width = 28
     worksheet.column_dimensions["O"].width = 36
     worksheet.column_dimensions["P"].width = 23
 
@@ -1398,9 +1375,9 @@ def _format_consumption_sheet(worksheet: Any, last_row: int) -> None:
     worksheet.auto_filter.ref = (
         f"A3:{get_column_letter(len(CONSUMPTION_HEADERS))}{max(last_row, 3)}"
     )
-    worksheet.row_dimensions[3].height = 44
+    worksheet.row_dimensions[3].height = 58
     widths = [
-        12, 24, 24, 28, 10, 28, 14, 20, 26, 23, 21, 12, 16, 34, 42
+        12, 24, 24, 28, 10, 28, 14, 20, 26, 23, 21, 12, 26, 34, 42
     ]
     for column, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(column)].width = width
