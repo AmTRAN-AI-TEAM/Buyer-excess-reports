@@ -130,6 +130,7 @@ class ExcessSummarySourceRow:
     description: str | None
     price: float | None
     model: str | None
+    customer: str | None
     model_remark: str | None
     period_metrics: tuple[ExcessSummaryMetrics, ...]
 
@@ -663,6 +664,7 @@ def _summary_source_row(
         description=row.main_record.description,
         price=row.price,
         model=row.model,
+        customer=row.customer,
         model_remark=row.model_remark,
         period_metrics=tuple(period_metrics),
     )

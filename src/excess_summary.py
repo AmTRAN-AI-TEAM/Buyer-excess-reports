@@ -84,7 +84,8 @@ DETAIL_TAIL_HEADERS = [
     "Excess POAmount USD",
     "Excess TotalAMT USD",
 ]
-UNCLASSIFIED_MODEL = "未分類（MODEL空白）"
+SHARED_MODEL = "多機種共用料"
+UNMATCHED_BOM_MODEL = "BOM 未配對"
 TOP_FIVE_LIMIT = 5
 SUMMARY_TOP_LIMIT = 2
 GATING_TOP_LIMIT = 3
@@ -95,6 +96,7 @@ _BomRowDetail = tuple[int, str, float]
 class _ModelSummary:
     key: str
     model: str
+    customer: str | None = None
     on_hand_qty: int = 0
     opo_qty: int = 0
     on_hand_amount: int = 0
@@ -106,6 +108,8 @@ class _ModelSummary:
 class _TopFiveEntry:
     rank: int
     source_row: int
+    model: str
+    model_key: str
     source: ExcessSummarySourceRow
     stock_qty: int
     stock_amount: int
@@ -199,9 +203,15 @@ def write_excess_summary(
     """
     output_file.parent.mkdir(parents=True, exist_ok=True)
     summary_by_model: dict[str, _ModelSummary] = {}
+    usage_slots = _bom_usage_slots(component_usages)
+    summary_models_by_source_row = _summary_models_by_source_row(
+        source_rows,
+        usage_slots,
+    )
     all_bom_matches_by_source_row = _bom_matches_by_source_model(
         source_rows,
-        component_usages,
+        usage_slots,
+        summary_models_by_source_row,
     )
     eligible_bom_matches_by_source_row = _filter_bom_matches_by_item_type(
         all_bom_matches_by_source_row,
@@ -209,19 +219,19 @@ def write_excess_summary(
     )
     top_five_by_model = _top_five_entries(
         source_rows,
+        summary_models_by_source_row,
         eligible_source_rows=set(eligible_bom_matches_by_source_row),
     )
-    usage_slots = _bom_usage_slots(component_usages)
 
-    for source in source_rows:
+    for index, source in enumerate(source_rows):
         metrics = _last_period_metrics(source)
-        model_key = _model_key(source.model)
-        model_display = model_key or UNCLASSIFIED_MODEL
-        normalized_key = model_key or ""
+        model_display = summary_models_by_source_row[index + 3]
+        normalized_key = model_display.casefold()
         summary = summary_by_model.setdefault(
             normalized_key,
             _ModelSummary(normalized_key, model_display),
         )
+        summary.customer = _merge_customer_values(summary.customer, source.customer)
         summary.on_hand_qty += max(metrics.stock_qty, 0)
         summary.opo_qty += metrics.po_qty
         summary.on_hand_amount += metrics.stock_amount or 0
@@ -243,6 +253,11 @@ def write_excess_summary(
         summary_headers[0] = "Raken"
         summary_headers[7] = "Raken建议加单"
         summary_headers[15] = "Raken 呆滯 预计TO-BE"
+    recommendation_headers = [
+        summary_headers[0],
+        "Customer\n客戶",
+        *summary_headers[1:],
+    ]
     for column, header in enumerate(summary_headers, start=1):
         summary_ws.cell(3, column, header)
 
@@ -315,7 +330,7 @@ def write_excess_summary(
         suggestions_by_model,
         period_label,
         selected_models,
-        summary_headers,
+        recommendation_headers,
         top_five_by_model,
         eligible_bom_matches_by_source_row,
         item_data,
@@ -368,10 +383,14 @@ def _filter_bom_matches_by_item_type(
 
 def _top_five_entries(
     source_rows: tuple[ExcessSummarySourceRow, ...],
+    summary_models_by_source_row: dict[int, str],
     *,
     eligible_source_rows: set[int] | None = None,
 ) -> dict[str, list[_TopFiveEntry]]:
-    candidates_by_model: dict[str, list[tuple[int, int, ExcessSummarySourceRow]]] = {}
+    candidates_by_model: dict[
+        str,
+        list[tuple[int, int, str, ExcessSummarySourceRow]],
+    ] = {}
     for index, source in enumerate(source_rows):
         source_row = index + 3
         if eligible_source_rows is not None and source_row not in eligible_source_rows:
@@ -380,16 +399,17 @@ def _top_five_entries(
             continue
         metrics = source.period_metrics[-1]
         if metrics.stock_amount is not None and metrics.stock_amount > 0:
-            model_key = _model_key(source.model) or ""
+            model = summary_models_by_source_row[source_row]
+            model_key = model.casefold()
             candidates_by_model.setdefault(model_key, []).append(
-                (metrics.stock_amount, index, source)
+                (metrics.stock_amount, index, model, source)
             )
 
     entries_by_model: dict[str, list[_TopFiveEntry]] = {}
     for model_key, candidates in candidates_by_model.items():
         candidates.sort(key=lambda item: (-item[0], item[1]))
         entries: list[_TopFiveEntry] = []
-        for rank, (stock_amount, index, source) in enumerate(
+        for rank, (stock_amount, index, model, source) in enumerate(
             candidates[:TOP_FIVE_LIMIT],
             start=1,
         ):
@@ -398,6 +418,8 @@ def _top_five_entries(
                 _TopFiveEntry(
                     rank=rank,
                     source_row=index + 3,
+                    model=model,
+                    model_key=model.casefold(),
                     source=source,
                     stock_qty=metrics.stock_qty,
                     stock_amount=stock_amount,
@@ -468,6 +490,43 @@ def _bom_usage_slots(
     )
 
 
+def _summary_models_by_source_row(
+    source_rows: tuple[ExcessSummarySourceRow, ...],
+    usage_slots: tuple[_BomUsageSlot, ...],
+) -> dict[int, str]:
+    return {
+        index + 3: _summary_model_for_source(source, usage_slots)
+        for index, source in enumerate(source_rows)
+    }
+
+
+def _summary_model_for_source(
+    source: ExcessSummarySourceRow,
+    usage_slots: tuple[_BomUsageSlot, ...],
+) -> str:
+    part_keys = frozenset(
+        _part_key(part)
+        for part in source.parts
+        if _part_key(part)
+    )
+    if not part_keys:
+        return UNMATCHED_BOM_MODEL
+
+    models_by_key: dict[str, str] = {}
+    for slot in usage_slots:
+        if slot.model_key in {"#n/a", "n/a"}:
+            continue
+        if part_keys.issubset(slot.part_usage):
+            models_by_key.setdefault(slot.model_key, slot.model_name)
+
+    if len(models_by_key) == 1:
+        model_name = next(iter(models_by_key.values()))
+        return SHARED_MODEL if "/" in model_name else model_name
+    if len(models_by_key) > 1:
+        return SHARED_MODEL
+    return UNMATCHED_BOM_MODEL
+
+
 def _match_source_to_model(
     source: ExcessSummarySourceRow,
     model_key: str,
@@ -523,10 +582,11 @@ def _match_source_to_model(
 
 def _bom_matches_by_source_model(
     source_rows: tuple[ExcessSummarySourceRow, ...],
-    component_usages: tuple[BomComponentUsage, ...],
+    usage_slots: tuple[_BomUsageSlot, ...],
+    summary_models_by_source_row: dict[int, str],
 ) -> dict[int, _BomMatch]:
     slot_lists_by_model: dict[str, list[_BomUsageSlot]] = {}
-    for slot in _bom_usage_slots(component_usages):
+    for slot in usage_slots:
         slot_lists_by_model.setdefault(slot.model_key, []).append(slot)
     usage_slots_by_model = {
         model_key: tuple(slots)
@@ -535,7 +595,7 @@ def _bom_matches_by_source_model(
 
     matches: dict[int, _BomMatch] = {}
     for index, source in enumerate(source_rows):
-        model_key = _model_key(source.model)
+        model_key = _model_key(summary_models_by_source_row.get(index + 3))
         if not model_key:
             continue
         match = _match_source_to_model(
@@ -652,7 +712,7 @@ def _recommend_production_orders(
             if check.extra_purchase_qty > 1e-9
         )
         supply_status = "不足" if shortages else "足夠"
-        owner = _model_key(entry.source.model) or ""
+        owner = entry.model_key
         suggestions_by_model.setdefault(owner, []).append(
             _ProductionSuggestion(
                 suggestion_id="",
@@ -895,6 +955,39 @@ def _summary_values(
     ]
 
 
+def _recommendation_values(
+    summary: _ModelSummary,
+    gating: CellRichText | None,
+    suggestions: tuple[_ProductionSuggestion, ...],
+) -> list[Any]:
+    values = _summary_values(
+        summary.model,
+        summary.on_hand_qty,
+        summary.opo_qty,
+        summary.on_hand_amount,
+        summary.opo_amount,
+        summary.total_amount,
+        gating,
+        suggestions,
+    )
+    return [values[0], summary.customer, *values[1:]]
+
+
+def _merge_customer_values(
+    current: str | None,
+    incoming: str | None,
+) -> str | None:
+    values: list[str] = []
+    for text in (current, incoming):
+        if not text:
+            continue
+        for value in str(text).split("/"):
+            value = value.strip()
+            if value and value not in values:
+                values.append(value)
+    return "/".join(values) or None
+
+
 def _suggestion_lines(
     suggestions: tuple[_ProductionSuggestion, ...],
     formatter: Any,
@@ -1069,13 +1162,8 @@ def _write_recommendations_sheet(
             item_data,
         )
         worksheet.append(
-            _summary_values(
-                summary.model,
-                summary.on_hand_qty,
-                summary.opo_qty,
-                summary.on_hand_amount,
-                summary.opo_amount,
-                summary.total_amount,
+            _recommendation_values(
+                summary,
                 gating,
                 suggestions,
             )
@@ -1085,52 +1173,19 @@ def _write_recommendations_sheet(
         for model in selected_models:
             if model.casefold() in displayed_source_models:
                 continue
-            worksheet.append(
-                [
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    f"{model}：找不到該來源 MODEL 的 Excess 摘要資料。",
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ]
-            )
+            values = [None] * len(headers)
+            values[7] = f"{model}：找不到該來源 MODEL 的 Excess 摘要資料。"
+            worksheet.append(values)
     if worksheet.max_row == 3:
-        worksheet.append(
-            [
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                "目前沒有符合條件的資料。",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ]
-        )
+        values = [None] * len(headers)
+        values[7] = "目前沒有符合條件的資料。"
+        worksheet.append(values)
 
     total_row = worksheet.max_row + 1
     worksheet.append(
         [
             "總計",
+            None,
             sum(summary.on_hand_qty for summary in displayed_summaries),
             sum(summary.opo_qty for summary in displayed_summaries),
             sum(summary.on_hand_amount for summary in displayed_summaries),
@@ -1148,7 +1203,7 @@ def _write_recommendations_sheet(
             None,
         ]
     )
-    _format_summary_sheet(worksheet, total_row)
+    _format_summary_sheet(worksheet, total_row, customer_column=True)
 
 
 def _gating_rich_text(
@@ -1314,7 +1369,7 @@ def _detail_values(entry: _TopFiveEntry, column_count: int) -> list[Any]:
         [
             entry.rank,
             entry.source_row,
-            _model_key(source.model) or UNCLASSIFIED_MODEL,
+            entry.model,
         ]
         + parts
         + [
@@ -1328,42 +1383,55 @@ def _detail_values(entry: _TopFiveEntry, column_count: int) -> list[Any]:
     )
 
 
-def _format_summary_sheet(worksheet: Any, total_row: int) -> None:
-    _format_common_sheet(worksheet, len(SUMMARY_HEADERS), total_row)
+def _format_summary_sheet(
+    worksheet: Any,
+    total_row: int,
+    *,
+    customer_column: bool = False,
+) -> None:
+    column_count = len(SUMMARY_HEADERS) + (1 if customer_column else 0)
+    _format_common_sheet(worksheet, column_count, total_row)
     worksheet.freeze_panes = "A4"
-    worksheet.auto_filter.ref = f"A3:{get_column_letter(len(SUMMARY_HEADERS))}{total_row - 1}"
+    worksheet.auto_filter.ref = f"A3:{get_column_letter(column_count)}{total_row - 1}"
     worksheet.row_dimensions[3].height = 58
-    worksheet.column_dimensions["A"].width = 32
-    worksheet.column_dimensions["B"].width = 12
-    worksheet.column_dimensions["C"].width = 12
-    worksheet.column_dimensions["D"].width = 19
-    worksheet.column_dimensions["E"].width = 17
-    worksheet.column_dimensions["F"].width = 14
-    worksheet.column_dimensions["G"].width = 64
-    worksheet.column_dimensions["H"].width = 30
-    worksheet.column_dimensions["I"].width = 14
-    worksheet.column_dimensions["J"].width = 22
-    worksheet.column_dimensions["K"].width = 26
-    worksheet.column_dimensions["L"].width = 24
-    worksheet.column_dimensions["M"].width = 22
-    worksheet.column_dimensions["N"].width = 28
-    worksheet.column_dimensions["O"].width = 36
-    worksheet.column_dimensions["P"].width = 23
+    widths = [
+        32,
+        *([24] if customer_column else []),
+        12,
+        12,
+        19,
+        17,
+        14,
+        64,
+        30,
+        14,
+        22,
+        26,
+        24,
+        22,
+        28,
+        36,
+        23,
+    ]
+    for column, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(column)].width = width
 
+    narrative_start = 8 if customer_column else 7
     for row in range(4, total_row):
         line_count = max(
             _wrapped_line_count(
                 worksheet.cell(row, column).value,
                 worksheet.column_dimensions[get_column_letter(column)].width or 18,
             )
-            for column in range(7, 17)
+            for column in range(narrative_start, column_count + 1)
         )
         worksheet.row_dimensions[row].height = max(
             30,
             min(409.5, line_count * 18 + 8),
         )
+    numeric_start = 3 if customer_column else 2
     for row in range(4, total_row + 1):
-        for column in range(2, 7):
+        for column in range(numeric_start, numeric_start + 5):
             worksheet.cell(row, column).number_format = "#,##0;[Red]-#,##0;0"
     for cell in worksheet[total_row]:
         cell.font = Font(name="Arial", size=9, bold=True, color="FF0070C0")
