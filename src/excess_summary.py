@@ -4,9 +4,9 @@ from dataclasses import dataclass, replace
 from math import ceil
 from pathlib import Path
 import unicodedata
-from typing import Any
+from typing import Any, Callable
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.rich_text import CellRichText, InlineFont, TextBlock
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -89,6 +89,20 @@ UNMATCHED_BOM_MODEL = "BOM 未配對"
 TOP_FIVE_LIMIT = 5
 SUMMARY_TOP_LIMIT = 2
 GATING_TOP_LIMIT = 3
+SELECTED_RECOMMENDATIONS_SHEET = "加單建議（選）"
+FULL_RECOMMENDATIONS_SHEET = "加單建議（全）"
+SUMMARY_PROGRESS_LABELS = (
+    "Read Excess report",
+    "Build BOM matches",
+    "Filter summary item types",
+    "Aggregate model summary",
+    "Build stock-amount Top 5",
+    "Build recommendations",
+    "Write summary sheets",
+    "Write detail sheets",
+    "Save Excess summary",
+)
+SUMMARY_PROGRESS_STEPS = len(SUMMARY_PROGRESS_LABELS)
 _BomRowDetail = tuple[int, str, float]
 
 
@@ -190,10 +204,12 @@ def write_excess_summary(
     period_label: str,
     output_file: Path,
     *,
+    excess_report_file: Path | None = None,
     component_usages: tuple[BomComponentUsage, ...] = (),
     customer: str | None = None,
     selected_models: tuple[str, ...] | None = None,
     item_data: ItemWorkbookData | None = None,
+    progress_step: Callable[[str], None] | None = None,
 ) -> tuple[int, int]:
     """Write a model summary and each model's five highest stock amounts.
 
@@ -201,28 +217,35 @@ def write_excess_summary(
     this workbook contains concrete values and does not depend on Excel's formula
     cache being populated.
     """
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[0])
+    if excess_report_file is not None:
+        source_rows = _source_rows_from_excess_report(source_rows, excess_report_file)
+
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[1])
     output_file.parent.mkdir(parents=True, exist_ok=True)
     summary_by_model: dict[str, _ModelSummary] = {}
     usage_slots = _bom_usage_slots(component_usages)
     summary_models_by_source_row = _summary_models_by_source_row(
         source_rows,
-        usage_slots,
     )
+    bom_models_by_source_row = _bom_models_by_source_row(source_rows, usage_slots)
     all_bom_matches_by_source_row = _bom_matches_by_source_model(
         source_rows,
         usage_slots,
-        summary_models_by_source_row,
+        bom_models_by_source_row,
     )
+
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[2])
     eligible_bom_matches_by_source_row = _filter_bom_matches_by_item_type(
         all_bom_matches_by_source_row,
         item_data,
     )
-    top_five_by_model = _top_five_entries(
-        source_rows,
-        summary_models_by_source_row,
-        eligible_source_rows=set(eligible_bom_matches_by_source_row),
-    )
 
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[3])
     for index, source in enumerate(source_rows):
         metrics = _last_period_metrics(source)
         model_display = summary_models_by_source_row[index + 3]
@@ -238,14 +261,20 @@ def write_excess_summary(
         summary.opo_amount += metrics.po_amount or 0
         summary.total_amount += metrics.total_amount
 
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[4])
+    top_five_by_model = _top_five_entries(
+        source_rows,
+        summary_models_by_source_row,
+        eligible_source_rows=set(eligible_bom_matches_by_source_row),
+    )
+
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[5])
     workbook = Workbook()
     recommendations_ws = workbook.active
-    recommendations_ws.title = "加單建議"
-    summary_sheet_title = (
-        "Raken summary"
-        if customer and customer.upper() == "RAKEN"
-        else "AVTC Summary"
-    )
+    recommendations_ws.title = SELECTED_RECOMMENDATIONS_SHEET
+    summary_sheet_title = FULL_RECOMMENDATIONS_SHEET
     summary_ws = workbook.create_sheet(summary_sheet_title)
     summary_ws["A1"] = f"選取區間：{period_label}"
     summary_headers = list(SUMMARY_HEADERS)
@@ -253,12 +282,18 @@ def write_excess_summary(
         summary_headers[0] = "Raken"
         summary_headers[7] = "Raken建议加单"
         summary_headers[15] = "Raken 呆滯 预计TO-BE"
+    summary_customer_column = bool(customer and customer.upper() == "RAKEN")
+    summary_sheet_headers = (
+        [summary_headers[0], "Customer\n客戶", *summary_headers[1:]]
+        if summary_customer_column
+        else summary_headers
+    )
     recommendation_headers = [
         summary_headers[0],
         "Customer\n客戶",
         *summary_headers[1:],
     ]
-    for column, header in enumerate(summary_headers, start=1):
+    for column, header in enumerate(summary_sheet_headers, start=1):
         summary_ws.cell(3, column, header)
 
     summaries = sorted(
@@ -276,11 +311,17 @@ def write_excess_summary(
         item_data,
     )
     suggestions_by_model = _number_suggestions(suggestions_by_model)
+    selected_report_models = _selected_report_models(
+        selected_models,
+    )
     top_five = [
         entry
         for summary in summaries
         for entry in top_five_by_model.get(summary.key, ())
     ]
+
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[6])
     for summary in summaries:
         suggestions = suggestions_by_model.get(summary.key, ())
         summary_top_entries = top_five_by_model.get(summary.key, ())[:GATING_TOP_LIMIT]
@@ -289,64 +330,72 @@ def write_excess_summary(
             eligible_bom_matches_by_source_row,
             item_data,
         )
-        summary_ws.append(
-            _summary_values(
-                summary.model,
-                summary.on_hand_qty,
-                summary.opo_qty,
-                summary.on_hand_amount,
-                summary.opo_amount,
-                summary.total_amount,
-                gating,
-                suggestions,
-            )
+        summary_values = _summary_values(
+            summary.model,
+            summary.on_hand_qty,
+            summary.opo_qty,
+            summary.on_hand_amount,
+            summary.opo_amount,
+            summary.total_amount,
+            gating,
+            suggestions,
         )
+        if summary_customer_column:
+            summary_values = [summary_values[0], summary.customer, *summary_values[1:]]
+        summary_ws.append(summary_values)
 
     total_row = summary_ws.max_row + 1
-    summary_ws.append(
-        [
-            "總計",
-            sum(item.on_hand_qty for item in summaries),
-            sum(item.opo_qty for item in summaries),
-            sum(item.on_hand_amount for item in summaries),
-            sum(item.opo_amount for item in summaries),
-            sum(item.total_amount for item in summaries),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ]
+    total_values = [
+        "總計",
+        sum(item.on_hand_qty for item in summaries),
+        sum(item.opo_qty for item in summaries),
+        sum(item.on_hand_amount for item in summaries),
+        sum(item.opo_amount for item in summaries),
+        sum(item.total_amount for item in summaries),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
+    if summary_customer_column:
+        total_values = [total_values[0], None, *total_values[1:]]
+    summary_ws.append(total_values)
+    _format_summary_sheet(
+        summary_ws,
+        total_row,
+        customer_column=bool(summary_customer_column),
     )
-    _format_summary_sheet(summary_ws, total_row)
     _write_recommendations_sheet(
         recommendations_ws,
         summaries,
         suggestions_by_model,
         period_label,
-        selected_models,
+        selected_report_models,
         recommendation_headers,
         top_five_by_model,
         eligible_bom_matches_by_source_row,
         item_data,
     )
 
-    consumption_ws = workbook.create_sheet("消耗建議")
-    _write_consumption_sheet(
-        consumption_ws,
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[7])
+    supply_ws = workbook.create_sheet("供料明細")
+    _write_supply_detail_sheet(
+        supply_ws,
         summaries,
         suggestions_by_model,
         period_label,
     )
 
-    supply_ws = workbook.create_sheet("供料明細")
-    _write_supply_detail_sheet(
-        supply_ws,
+    consumption_ws = workbook.create_sheet("消耗建議")
+    _write_consumption_sheet(
+        consumption_ws,
         summaries,
         suggestions_by_model,
         period_label,
@@ -361,6 +410,8 @@ def write_excess_summary(
         detail_ws.append(_detail_values(entry, len(detail_headers)))
     _format_detail_sheet(detail_ws, len(detail_headers), detail_ws.max_row)
 
+    if progress_step is not None:
+        progress_step(SUMMARY_PROGRESS_LABELS[8])
     workbook.save(output_file)
     return len(summaries), len(top_five)
 
@@ -379,6 +430,72 @@ def _filter_bom_matches_by_item_type(
         if is_allowed_summary_item_type(item_type):
             filtered[source_row] = match
     return filtered
+
+
+def _source_rows_from_excess_report(
+    source_rows: tuple[ExcessSummarySourceRow, ...],
+    excess_report_file: Path,
+) -> tuple[ExcessSummarySourceRow, ...]:
+    """Use the fields actually written to the current Excess report."""
+    workbook = load_workbook(excess_report_file, read_only=True, data_only=True)
+    try:
+        worksheet = workbook["Excess"] if "Excess" in workbook.sheetnames else workbook.active
+        header_row = None
+        headers: tuple[Any, ...] = ()
+        for row_number, row in enumerate(
+            worksheet.iter_rows(min_row=1, max_row=20, values_only=True),
+            start=1,
+        ):
+            if any(str(value or "").strip() == "MODEL" for value in row):
+                header_row = row_number
+                headers = tuple(row)
+                break
+        if header_row is None:
+            raise ValueError("Cannot find MODEL column in the generated Excess report")
+
+        model_column = next(
+            index
+            for index, value in enumerate(headers, start=1)
+            if str(value or "").strip() == "MODEL"
+        )
+        customer_column = next(
+            (
+                index
+                for index, value in enumerate(headers, start=1)
+                if str(value or "").strip().casefold().startswith("customer")
+            ),
+            None,
+        )
+        report_rows = list(
+            worksheet.iter_rows(
+                min_row=header_row + 1,
+                max_row=header_row + len(source_rows),
+                values_only=True,
+            )
+        )
+        if len(report_rows) != len(source_rows):
+            raise ValueError(
+                "Generated Excess report rows do not match the summary source rows"
+            )
+
+        updated_rows: list[ExcessSummarySourceRow] = []
+        for source, row in zip(source_rows, report_rows):
+            model = row[model_column - 1] if model_column <= len(row) else None
+            customer = (
+                row[customer_column - 1]
+                if customer_column is not None and customer_column <= len(row)
+                else source.customer
+            )
+            updated_rows.append(
+                replace(
+                    source,
+                    model=None if model is None else str(model).strip(),
+                    customer=None if customer is None else str(customer).strip(),
+                )
+            )
+        return tuple(updated_rows)
+    finally:
+        workbook.close()
 
 
 def _top_five_entries(
@@ -492,12 +609,45 @@ def _bom_usage_slots(
 
 def _summary_models_by_source_row(
     source_rows: tuple[ExcessSummarySourceRow, ...],
+) -> dict[int, str]:
+    return {
+        index + 3: _report_model_for_source(source)
+        for index, source in enumerate(source_rows)
+    }
+
+
+def _report_model_for_source(source: ExcessSummarySourceRow) -> str:
+    """Use the MODEL value that is written to the Excess report as the owner."""
+    model = str(source.model or "").strip()
+    return model or UNMATCHED_BOM_MODEL
+
+
+def _bom_models_by_source_row(
+    source_rows: tuple[ExcessSummarySourceRow, ...],
     usage_slots: tuple[_BomUsageSlot, ...],
 ) -> dict[int, str]:
+    """Keep BOM classification separate from the Excess-report MODEL owner."""
     return {
         index + 3: _summary_model_for_source(source, usage_slots)
         for index, source in enumerate(source_rows)
     }
+
+
+def _selected_report_models(
+    selected_models: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Normalize selections that came directly from the Excess report MODEL column."""
+    if selected_models is None:
+        return None
+
+    selected: list[str] = []
+    selected_keys: set[str] = set()
+    for model in selected_models:
+        normalized = str(model).strip().casefold()
+        if normalized and normalized not in selected_keys:
+            selected.append(str(model).strip())
+            selected_keys.add(normalized)
+    return tuple(selected)
 
 
 def _summary_model_for_source(
@@ -583,7 +733,7 @@ def _match_source_to_model(
 def _bom_matches_by_source_model(
     source_rows: tuple[ExcessSummarySourceRow, ...],
     usage_slots: tuple[_BomUsageSlot, ...],
-    summary_models_by_source_row: dict[int, str],
+    bom_models_by_source_row: dict[int, str],
 ) -> dict[int, _BomMatch]:
     slot_lists_by_model: dict[str, list[_BomUsageSlot]] = {}
     for slot in usage_slots:
@@ -595,7 +745,7 @@ def _bom_matches_by_source_model(
 
     matches: dict[int, _BomMatch] = {}
     for index, source in enumerate(source_rows):
-        model_key = _model_key(summary_models_by_source_row.get(index + 3))
+        model_key = _model_key(bom_models_by_source_row.get(index + 3))
         if not model_key:
             continue
         match = _match_source_to_model(
@@ -646,14 +796,10 @@ def _recommend_production_orders(
 
     recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]] = {}
     for model, entries in top_five_by_model.items():
-        source_model_key = model.casefold()
         recommendable_entries = tuple(
             entry
             for entry in entries
-            if (
-                entry.source_row in assignments
-                and assignments[entry.source_row].model_key == source_model_key
-            )
+            if entry.source_row in assignments
         )[:SUMMARY_TOP_LIMIT]
         if recommendable_entries:
             recommendable_entries_by_model[model] = recommendable_entries
@@ -981,11 +1127,41 @@ def _merge_customer_values(
     for text in (current, incoming):
         if not text:
             continue
-        for value in str(text).split("/"):
-            value = value.strip()
-            if value and value not in values:
+        tokens = [value.strip() for value in str(text).split("/")]
+        index = 0
+        while index < len(tokens):
+            value = tokens[index]
+            normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+            # Excel-style #N/A or N/A can be split into two tokens by the
+            # slash separator; discard the pair as one empty value.
+            if normalized in {"#n", "n"} and index + 1 < len(tokens):
+                next_normalized = (
+                    unicodedata.normalize("NFKC", tokens[index + 1])
+                    .strip()
+                    .casefold()
+                )
+                if next_normalized == "a":
+                    index += 2
+                    continue
+            if value and not _is_empty_customer_value(value) and value not in values:
                 values.append(value)
+            index += 1
     return "/".join(values) or None
+
+
+def _is_empty_customer_value(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value).strip().casefold()
+    return normalized in {
+        "#n",
+        "#a",
+        "#n/a",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "-",
+        "--",
+    }
 
 
 def _suggestion_lines(
@@ -994,7 +1170,7 @@ def _suggestion_lines(
 ) -> str | None:
     if not suggestions:
         return None
-    return "\n".join(
+    return "\n\n".join(
         f"{suggestion.suggestion_id}｜{formatter(suggestion)}"
         for suggestion in suggestions
     )
@@ -1026,14 +1202,21 @@ def _suggestion_shortage_text(suggestion: _ProductionSuggestion) -> str:
     if not suggestion.shortage_details:
         return "無"
     preview_limit = 5
-    preview = "；".join(suggestion.shortage_details[:preview_limit])
+    preview = "\n".join(
+        f"{detail}；"
+        for detail in suggestion.shortage_details[:preview_limit]
+    )
     remaining = len(suggestion.shortage_details) - preview_limit
     if remaining > 0:
         return (
-            f"共 {len(suggestion.shortage_details)} 筆料號／替代料群不足："
-            f"{preview}；另有 {remaining} 筆，詳見供料明細"
+            f"共 {len(suggestion.shortage_details)} 筆料號／替代料群不足：\n"
+            f"{preview}\n"
+            f"另有 {remaining} 筆，詳見供料明細"
         )
-    return f"共 {len(suggestion.shortage_details)} 筆料號／替代料群不足：{preview}"
+    return (
+        f"共 {len(suggestion.shortage_details)} 筆料號／替代料群不足：\n"
+        f"{preview}"
+    )
 
 
 def _format_usd(value: float | None) -> str:
@@ -1490,8 +1673,6 @@ def _format_detail_sheet(worksheet: Any, column_count: int, last_row: int) -> No
     worksheet.auto_filter.ref = f"A3:{get_column_letter(column_count)}{max(last_row, 3)}"
     worksheet.row_dimensions[3].height = 44
     no_fill = PatternFill(fill_type=None)
-    for column in range(1, column_count + 1):
-        worksheet.cell(3, column).fill = no_fill
 
     previous_model: Any = object()
     model_group = -1
@@ -1539,17 +1720,6 @@ def _format_detail_sheet(worksheet: Any, column_count: int, last_row: int) -> No
 def _format_common_sheet(worksheet: Any, column_count: int, last_row: int) -> None:
     thin_gray = Side(style="thin", color="BFBFBF")
     border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
-    header_fills = [
-        "D9EAF7",
-        "D9EAF7",
-        "D9EAF7",
-        "FCE4D6",
-        "FCE4D6",
-        "FFF2CC",
-        "E7E6E6",
-        "D9EAF7",
-        "FFF2CC",
-    ]
     for row in worksheet.iter_rows(min_row=1, max_row=max(last_row, 3), max_col=column_count):
         for cell in row:
             cell.font = Font(name="Arial", size=9)
@@ -1559,15 +1729,34 @@ def _format_common_sheet(worksheet: Any, column_count: int, last_row: int) -> No
     worksheet["A1"].font = Font(name="Arial", size=10, bold=True, color="FF704016")
     for column in range(1, column_count + 1):
         cell = worksheet.cell(3, column)
-        cell.fill = PatternFill("solid", fgColor=header_fills[(column - 1) % len(header_fills)])
+        cell.fill = PatternFill(
+            "solid",
+            fgColor=_header_fill_color(worksheet, column, column_count),
+        )
         cell.font = Font(name="Arial", size=9, bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for row in range(4, last_row + 1):
         for column in range(1, column_count + 1):
             cell = worksheet.cell(row, column)
+            header = worksheet.cell(3, column).value
             if column == 1 or (
-                worksheet.title in {"AVTC Summary", "Raken summary", "加單建議"}
-                and column in {7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+                worksheet.title
+                in {SELECTED_RECOMMENDATIONS_SHEET, FULL_RECOMMENDATIONS_SHEET}
+                and header
+                in {
+                    "Gating",
+                    "AVTC建议加单",
+                    "Raken建议加单",
+                    "消耗率",
+                    "建議料號可消耗\nUSD",
+                    "所有相關料號原有\nExcess USD（加單前）",
+                    "所有相關料號可消耗\nUSD",
+                    "加單後剩餘\nExcess USD",
+                    "庫存數量是否可滿足加單",
+                    "需額外採購",
+                    "AVTC 呆滯 预计TO-BE",
+                    "Raken 呆滯 预计TO-BE",
+                }
             ):
                 cell.alignment = Alignment(
                     horizontal="left",
@@ -1580,6 +1769,70 @@ def _format_common_sheet(worksheet: Any, column_count: int, last_row: int) -> No
                     vertical="center",
                     wrap_text=True,
                 )
+
+
+def _header_fill_color(worksheet: Any, column: int, column_count: int) -> str:
+    """Return a consistent fill for a logical group of report columns."""
+    blue = "D9EAF7"
+    peach = "FCE4D6"
+    yellow = "FFF2CC"
+    green = "E2F0D9"
+    red = "F4CCCC"
+    purple = "E4DFEC"
+    gray = "E7E6E6"
+    title = worksheet.title
+
+    if title in {SELECTED_RECOMMENDATIONS_SHEET, FULL_RECOMMENDATIONS_SHEET}:
+        # RAKEN has Customer immediately after the first model column;
+        # AVTC does not have that extra column.
+        groups = (
+            ((1, 7, blue), (8, 9, peach), (10, 10, yellow),
+             (11, 14, green), (15, 16, red), (17, 17, gray))
+            if column_count == len(SUMMARY_HEADERS) + 1
+            else
+            ((1, 6, blue), (7, 8, peach), (9, 9, yellow),
+             (10, 13, green), (14, 15, red), (16, 16, gray))
+        )
+    elif title == "消耗建議":
+        groups = (
+            (1, 6, blue), (7, 7, peach), (8, 11, green),
+            (12, 12, yellow), (13, 14, red), (15, 15, gray)
+        )
+    elif title == "供料明細":
+        groups = (
+            (1, 5, blue), (6, 7, peach), (8, 10, yellow),
+            (11, 13, green), (14, 16, purple), (17, 17, gray)
+        )
+    elif title == "庫存金額Top5":
+        header = worksheet.cell(3, column).value
+        if header and (
+            str(header).startswith("PartNo")
+            or str(header).startswith("替代料")
+        ):
+            return blue
+        if header in {"排名", "來源列", "MODEL"}:
+            return blue
+        if header == "Price（USD)":
+            return yellow
+        if header in {"Excess stock QTY", "Excess POQTY"}:
+            return green
+        if header in {
+            "Excess stock Amount USD",
+            "Excess POAmount USD",
+            "Excess TotalAMT USD",
+        }:
+            return peach
+        return gray
+    else:
+        groups = (
+            (1, 3, blue), (4, 5, peach), (6, 6, yellow),
+            (7, 7, gray), (8, 8, blue), (9, 9, yellow)
+        )
+
+    for start, end, color in groups:
+        if start <= column <= end:
+            return color
+    return gray
 
 
 def _wrapped_line_count(value: Any, column_width: float) -> int:

@@ -21,14 +21,17 @@ from report_errors import ReportError
 from source_check import SourceCheck, check_sources, input_signature, source_requirements
 from runner import (
     CUSTOMERS,
+    PreparedReport,
     ProgressEvent,
     RunResult,
+    SUMMARY_PROGRESS_STEPS,
     customer_input_dir,
     customer_output_file,
-    generate_report,
-    load_summary_models,
+    load_report_models,
+    prepare_report,
     project_root,
     progress_steps_for_customer,
+    write_summary_for_report,
 )
 
 
@@ -54,6 +57,15 @@ PHASE_LABELS = {
     "Build Excess rows": "計算 Excess 並整理報表資料",
     "Write Excel files": "寫入 Excess 與 next_time 報表",
     "Write Excess summary": "產生 excess_summary.xlsx",
+    "Read Excess report": "讀取本次 Excess 報表",
+    "Build BOM matches": "建立 BOM 料號配對",
+    "Filter summary item types": "篩選 Summary 料號 TYPE",
+    "Aggregate model summary": "彙總各 MODEL 庫存金額",
+    "Build stock-amount Top 5": "計算庫存金額 Top5",
+    "Build recommendations": "計算 Gating 與加單建議",
+    "Write summary sheets": "寫入加單建議工作表",
+    "Write detail sheets": "寫入供料與消耗明細",
+    "Save Excess summary": "儲存 excess_summary.xlsx",
     "Write incomplete alternates file": "寫入不完全替代料明細",
     "Done": "所有報表已完成",
 }
@@ -271,7 +283,7 @@ class ModelSelectionDialog(tk.Toplevel):
         ).grid(row=0, column=0, sticky="ew")
         tk.Label(
             body,
-            text="選項來自 BOM 的 MODEL 欄。新工作表只列出勾選 MODEL 的加單建議。",
+            text="選項來自剛產出的 Excess 報表 MODEL 欄；只會影響本次 excess_summary.xlsx。",
             bg=PANEL,
             fg=MUTED,
             font=app.font(16),
@@ -353,7 +365,7 @@ class ModelSelectionDialog(tk.Toplevel):
         footer.grid(row=4, column=0, sticky="ew", pady=(app.px(10), 0))
         self.count_label = tk.Label(
             footer,
-            text="正在讀取 BOM MODEL…",
+            text="正在讀取 Excess 報表 MODEL…",
             bg=PANEL,
             fg=MUTED,
             font=app.font(15),
@@ -364,9 +376,9 @@ class ModelSelectionDialog(tk.Toplevel):
         button_row.pack(side="right")
         self.back_button = ActionButton(
             button_row,
-            "返回",
+            "完成 Excess 報表",
             on_back,
-            width=app.px(105),
+            width=app.px(175),
             height=app.px(48),
             font=app.font(16, True),
             primary=False,
@@ -374,7 +386,7 @@ class ModelSelectionDialog(tk.Toplevel):
         self.back_button.pack(side="left", padx=(0, app.px(8)))
         self.skip_button = ActionButton(
             button_row,
-            "略過此頁，不產出summary",
+            "略過，不產出summary",
             on_skip,
             width=app.px(260),
             height=app.px(48),
@@ -406,7 +418,7 @@ class ModelSelectionDialog(tk.Toplevel):
     def set_models(self, models: tuple[str, ...] | None, error: Exception | None = None) -> None:
         if error is not None:
             self.count_label.configure(
-                text=f"讀取 BOM MODEL 失敗：{error}",
+                text=f"讀取 Excess 報表 MODEL 失敗：{error}",
                 fg=ERROR,
             )
             self.confirm_button.set_state("無 MODEL 清單", enabled=False)
@@ -414,7 +426,7 @@ class ModelSelectionDialog(tk.Toplevel):
             return
         self.models = models or ()
         if not self.models:
-            self.count_label.configure(text="BOM 中沒有可選的非空 MODEL。", fg=WARNING)
+            self.count_label.configure(text="Excess 報表中沒有可選的非空 MODEL。", fg=WARNING)
             self.confirm_button.set_state("無 MODEL 清單", enabled=False)
             self.all_checkbox.configure(state="disabled")
             return
@@ -524,6 +536,7 @@ class ExcessApp:
         self.customer: str | None = None
         self.summary_models: tuple[str, ...] | None = None
         self.include_summary = True
+        self.prepared_report: PreparedReport | None = None
         self.running = False
         self.exit_code = 0
         self.screen = "welcome"
@@ -669,19 +682,18 @@ class ExcessApp:
         self.customer = customer
         self.summary_models = None
         self.include_summary = True
-        self._show_model_selector(customer)
+        self.prepared_report = None
+        self._start_checklist(customer)
 
     def _show_model_selector(
         self,
-        customer: str,
+        models: tuple[str, ...],
         *,
         initial_models: tuple[str, ...] | None = None,
     ) -> None:
-        self._model_token += 1
-        token = self._model_token
         dialog = ModelSelectionDialog(
             self,
-            customer=customer,
+            customer=self.customer or "",
             initial_models=initial_models,
             on_confirm=self._summary_models_selected,
             on_skip=self._skip_summary_selection,
@@ -689,58 +701,33 @@ class ExcessApp:
         )
         self.dialog = dialog
         self._model_dialog = dialog
-        input_dir = customer_input_dir(self.app_root, customer)
-        events = self.events
-
-        def load_models() -> None:
-            try:
-                models = load_summary_models(input_dir)
-            except Exception as exc:
-                events.put(("models", (token, None, exc)))
-            else:
-                events.put(("models", (token, models, None)))
-
-        threading.Thread(
-            target=load_models,
-            daemon=True,
-            name="excess-model-loader",
-        ).start()
-
-    def _receive_models(self, payload) -> None:
-        token, models, error = payload
-        if token != self._model_token or self.dialog is not getattr(self, "_model_dialog", None):
-            return
-        self._model_dialog.set_models(models, error)
+        dialog.set_models(models)
 
     def _summary_models_selected(self, models: tuple[str, ...] | None) -> None:
         self.dialog = None  # The selector closes itself before this callback.
         self._model_token += 1
         self.summary_models = models
         self.include_summary = True
-        if self.customer is not None:
-            self._start_checklist(self.customer)
+        self._begin_summary_run()
 
     def _skip_summary_selection(self) -> None:
         self._dismiss_dialog()
         self._model_token += 1
         self.summary_models = None
         self.include_summary = False
-        if self.customer is not None:
-            self._start_checklist(self.customer)
+        self._finish_without_summary()
 
     def _back_from_model_selection(self) -> None:
         self._dismiss_dialog()
         self._model_token += 1
-        self.customer = None
-        self.show_factories()
+        self.summary_models = None
+        self.include_summary = False
+        self._finish_without_summary()
 
     def _return_to_model_selection(self) -> None:
         if self.running or self.dialog is not None:
             return
-        if self.customer is None:
-            self.show_factories()
-            return
-        self._show_model_selector(self.customer, initial_models=self.summary_models)
+        self.show_factories()
 
     def _start_checklist(self, customer: str) -> None:
         self._reset("checklist")
@@ -849,20 +836,43 @@ class ExcessApp:
 
     def _begin_run(self) -> None:
         self.running = True
-        self._show_running()
+        self._show_running(summary_only=False)
         customer = self.customer
         self.worker = threading.Thread(target=self._run_worker, args=(customer,), daemon=True, name="excess-report-worker")
         self.worker.start()
 
-    def _show_running(self) -> None:
+    def _begin_summary_run(self) -> None:
+        if self.running or self.prepared_report is None:
+            return
+        self.running = True
+        self._show_running(summary_only=True)
+        self.worker = threading.Thread(
+            target=self._summary_worker,
+            daemon=True,
+            name="excess-summary-worker",
+        )
+        self.worker.start()
+
+    def _finish_without_summary(self) -> None:
+        if self.prepared_report is None:
+            self.show_factories()
+            return
+        self.running = False
+        self.result = self.prepared_report.result
+        self._show_success()
+
+    def _show_running(self, *, summary_only: bool) -> None:
         self._reset("running")
         self.last_progress = None
-        progress_total = progress_steps_for_customer(
-            self.customer,
-            include_summary=self.include_summary,
+        progress_total = (
+            SUMMARY_PROGRESS_STEPS
+            if summary_only
+            else progress_steps_for_customer(self.customer, include_summary=False)
         )
-        self._text(78, 226, "STEP 02  /  整理報表", size=17, color=ACCENT, bold=True, anchor="w")
-        self.title_item = self._text(78, 266, "正在整理報表", size=36, bold=True, anchor="w")
+        step_text = "STEP 03  /  產出 Summary" if summary_only else "STEP 02  /  整理報表"
+        title_text = "正在產生 excess_summary.xlsx" if summary_only else "正在整理 Excess 報表"
+        self._text(78, 226, step_text, size=17, color=ACCENT, bold=True, anchor="w")
+        self.title_item = self._text(78, 266, title_text, size=36, bold=True, anchor="w")
         self._text(1122, 265, f"工廠  {self.customer}", size=22, color=ACCENT, bold=True, anchor="e")
         self.phase_item = self._text(78, 313, "準備讀取來源檔案…", size=22, anchor="w")
         self.progressbar = ttk.Progressbar(
@@ -893,11 +903,24 @@ class ExcessApp:
 
     def _run_worker(self, customer: str) -> None:
         try:
-            result = generate_report(
+            prepared = prepare_report(
                 customer_input_dir(self.app_root, customer), customer_output_file(self.app_root, customer),
                 customer=customer, on_event=self.events.put,
-                summary_models=self.summary_models,
-                include_summary=self.include_summary,
+            )
+            models = load_report_models(prepared.result.output_file)
+        except Exception as exc:
+            self.events.put(("error", exc))
+        else:
+            self.events.put(("report_ready", (prepared, models)))
+
+    def _summary_worker(self) -> None:
+        try:
+            if self.prepared_report is None:
+                raise RuntimeError("找不到已完成的 Excess 報表處理結果")
+            result = write_summary_for_report(
+                self.prepared_report,
+                selected_models=self.summary_models,
+                on_event=self.events.put,
             )
         except Exception as exc:
             self.events.put(("error", exc))
@@ -928,8 +951,13 @@ class ExcessApp:
         if kind == "checklist":
             self._receive_checks(payload)
             return
-        if kind == "models":
-            self._receive_models(payload)
+        if kind == "report_ready":
+            self.running = False
+            prepared, models = payload
+            self.prepared_report = prepared
+            self.result = prepared.result
+            self._append_log(f"Excess 報表已完成，讀取到 {len(models)} 個 MODEL。")
+            self._show_model_selector(models)
             return
         self.running = False
         if kind == "success":

@@ -3,20 +3,25 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic
 from typing import Callable, Sequence
+
+from openpyxl import load_workbook
 
 try:
     from tqdm import tqdm
 except Exception:  # pragma: no cover - optional dependency fallback
     tqdm = None
 
-from bom_alternates import load_bom_alternates, load_bom_models
+from bom_alternates import BomAlternates, load_bom_alternates
 from customer_profiles import profile_for
-from excess_builder import build_excess_rows
-from excess_summary import write_excess_summary
+from excess_builder import ExcessBuildResult, build_excess_rows
+from excess_summary import (
+    SUMMARY_PROGRESS_STEPS,
+    write_excess_summary,
+)
 from formatting import write_excess_workbook
 from incomplete_alternates import write_incomplete_alternates_workbook
 from previous_report import find_previous_excess_report, load_previous_excess_source
@@ -26,6 +31,7 @@ from workbook_io import (
     find_item_file,
     find_price_file,
     find_shortage_source,
+    ItemWorkbookData,
     load_item_workbook_data,
     load_shortage_records,
 )
@@ -47,6 +53,7 @@ PROGRESS_LABELS = (
     "Write incomplete alternates file",
 )
 PROGRESS_STEPS = len(PROGRESS_LABELS)
+REPORT_PROGRESS_STEPS = PROGRESS_STEPS - 1
 NEXT_TIME_EXCESS_REPORT_NAME = "next_time_excess_report.xlsx"
 
 
@@ -57,7 +64,9 @@ def progress_steps_for_customer(
 ) -> int:
     """Return the number of real processing stages for a customer."""
     has_summary = bool(customer and customer.upper() in {"AVTC", "RAKEN"})
-    return PROGRESS_STEPS - (0 if has_summary and include_summary else 1)
+    return REPORT_PROGRESS_STEPS + (
+        SUMMARY_PROGRESS_STEPS if has_summary and include_summary else 0
+    )
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,17 @@ class RunResult:
     input_part_count: int
     output_row_count: int
     part_column_count: int
+
+
+@dataclass(frozen=True)
+class PreparedReport:
+    """A completed Excess report that can receive a later Summary selection."""
+
+    result: RunResult
+    customer: str | None
+    build_result: ExcessBuildResult
+    alternates: BomAlternates
+    item_data: ItemWorkbookData
 
 
 @dataclass(frozen=True)
@@ -198,26 +218,22 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def generate_report(
+def prepare_report(
     input_dir: Path,
     output_file: Path,
     *,
     customer: str | None = None,
     show_progress: bool = True,
     on_event: Callable[[ProgressEvent], None] | None = None,
-    summary_models: tuple[str, ...] | None = None,
-    include_summary: bool = True,
-) -> RunResult:
+) -> PreparedReport:
+    """Build and write the Excess reports, leaving Summary for a later step."""
     input_dir = input_dir.resolve()
     output_file = output_file.resolve()
     customer_code = resolve_customer(customer, input_dir, output_file)
     profile = profile_for(customer_code)
 
     with Progress(
-        progress_steps_for_customer(
-            customer_code,
-            include_summary=include_summary,
-        ),
+        progress_steps_for_customer(customer_code, include_summary=False),
         enabled=show_progress,
         callback=on_event,
     ) as progress:
@@ -318,23 +334,6 @@ def generate_report(
             with file_context(next_time_output_file, "寫入下次使用的上一版報表"):
                 shutil.copyfile(output_file, next_time_output_file)
 
-        summary_output_file = None
-        if customer_code in {"AVTC", "RAKEN"} and include_summary:
-            progress.step("Write Excess summary")
-            summary_output_file = output_file.with_name("excess_summary.xlsx")
-            with file_context(summary_output_file, "寫入 Excess summary"):
-                model_count, top_five_count = write_excess_summary(
-                    result.summary_source_rows,
-                    result.demand_labels[-1],
-                    summary_output_file,
-                    component_usages=alternates.component_usages,
-                    customer=customer_code,
-                    selected_models=summary_models,
-                    item_data=item_data,
-                )
-            progress.message(f"Excess summary models: {model_count}")
-            progress.message(f"Per-model stock-amount top rows: {top_five_count}")
-
         progress.step("Write incomplete alternates file")
         incomplete_alternates_file = output_file.with_name("incomplete_alternates.xlsx")
         with file_context(incomplete_alternates_file, "寫入不完全替代料明細"):
@@ -351,11 +350,9 @@ def generate_report(
         progress.message(f"Incomplete alternate groups: {len(alternates.incomplete_alternate_groups)}")
         progress.message(f"Output: {output_file}")
         progress.message(f"Next-time Excess source: {next_time_output_file}")
-        if summary_output_file is not None:
-            progress.message(f"Excess summary: {summary_output_file}")
         progress.message(f"Incomplete alternates: {incomplete_alternates_file}")
 
-    return RunResult(
+    run_result = RunResult(
         bom_file=bom_file,
         item_file=item_file,
         price_file=price_file,
@@ -364,11 +361,83 @@ def generate_report(
         output_file=output_file,
         next_time_output_file=next_time_output_file,
         incomplete_alternates_file=incomplete_alternates_file,
-        summary_output_file=summary_output_file,
+        summary_output_file=None,
         input_part_count=result.input_part_count,
         output_row_count=result.output_row_count,
         part_column_count=result.part_column_count,
     )
+
+    return PreparedReport(
+        result=run_result,
+        customer=customer_code,
+        build_result=result,
+        alternates=alternates,
+        item_data=item_data,
+    )
+
+
+def write_summary_for_report(
+    prepared: PreparedReport,
+    *,
+    selected_models: tuple[str, ...] | None = None,
+    show_progress: bool = True,
+    on_event: Callable[[ProgressEvent], None] | None = None,
+) -> RunResult:
+    """Write Summary from an already-generated Excess report."""
+    if prepared.customer not in {"AVTC", "RAKEN"}:
+        return prepared.result
+
+    summary_output_file = prepared.result.output_file.with_name("excess_summary.xlsx")
+    with Progress(
+        SUMMARY_PROGRESS_STEPS,
+        enabled=show_progress,
+        callback=on_event,
+    ) as progress:
+        with file_context(summary_output_file, "寫入 Excess summary"):
+            model_count, top_five_count = write_excess_summary(
+                prepared.build_result.summary_source_rows,
+                prepared.build_result.demand_labels[-1],
+                summary_output_file,
+                excess_report_file=prepared.result.output_file,
+                component_usages=prepared.alternates.component_usages,
+                customer=prepared.customer,
+                selected_models=selected_models,
+                item_data=prepared.item_data,
+                progress_step=progress.step,
+            )
+        progress.message(f"Excess summary models: {model_count}")
+        progress.message(f"Per-model stock-amount top rows: {top_five_count}")
+        progress.message(f"Excess summary: {summary_output_file}")
+
+    return replace(prepared.result, summary_output_file=summary_output_file)
+
+
+def generate_report(
+    input_dir: Path,
+    output_file: Path,
+    *,
+    customer: str | None = None,
+    show_progress: bool = True,
+    on_event: Callable[[ProgressEvent], None] | None = None,
+    summary_models: tuple[str, ...] | None = None,
+    include_summary: bool = True,
+) -> RunResult:
+    """Generate the reports, then write Summary for non-interactive callers."""
+    prepared = prepare_report(
+        input_dir,
+        output_file,
+        customer=customer,
+        show_progress=show_progress,
+        on_event=on_event,
+    )
+    if include_summary:
+        return write_summary_for_report(
+            prepared,
+            selected_models=summary_models,
+            show_progress=show_progress,
+            on_event=on_event,
+        )
+    return prepared.result
 
 
 def customer_input_dir(root: Path, customer: str) -> Path:
@@ -379,10 +448,49 @@ def customer_output_file(root: Path, customer: str) -> Path:
     return root / "output" / customer.upper() / "excess_report.xlsx"
 
 
-def load_summary_models(input_dir: Path) -> tuple[str, ...]:
-    """Read the distinct BOM MODEL values used by the summary selector."""
-    bom_file = find_bom_file(input_dir)
-    return load_bom_models(bom_file)
+def load_report_models(excess_report_file: Path) -> tuple[str, ...]:
+    """Read unique non-empty MODEL values from the generated Excess report."""
+    workbook = load_workbook(excess_report_file, read_only=True, data_only=True)
+    try:
+        worksheet = workbook["Excess"] if "Excess" in workbook.sheetnames else workbook.active
+        header_row = None
+        headers: tuple[object, ...] = ()
+        for row_number, row in enumerate(
+            worksheet.iter_rows(min_row=1, max_row=20, values_only=True),
+            start=1,
+        ):
+            if any(str(value or "").strip() == "MODEL" for value in row):
+                header_row = row_number
+                headers = tuple(row)
+                break
+        if header_row is None:
+            raise ValueError("Cannot find MODEL column in the generated Excess report")
+
+        model_column = next(
+            index
+            for index, value in enumerate(headers, start=1)
+            if str(value or "").strip() == "MODEL"
+        )
+        models: list[str] = []
+        seen: set[str] = set()
+        for row in worksheet.iter_rows(
+            min_row=header_row + 1,
+            values_only=True,
+        ):
+            value = row[model_column - 1] if model_column <= len(row) else None
+            model = str(value).strip() if value is not None else ""
+            key = model.casefold()
+            if model and key not in seen:
+                seen.add(key)
+                models.append(model)
+        return tuple(models)
+    finally:
+        workbook.close()
+
+
+def load_summary_models(source: Path) -> tuple[str, ...]:
+    """Backward-compatible name; ``source`` is now the generated Excess file."""
+    return load_report_models(source)
 
 
 def resolve_customer(customer: str | None, *paths: Path | None) -> str | None:
@@ -483,7 +591,7 @@ def select_summary_models_prompt(
 ) -> tuple[tuple[str, ...] | None, bool]:
     """Prompt for summary target models; return (models, include_summary)."""
     selected = set(models)
-    print("\n請選擇要列入 summary 第一張「加單建議」的 BOM MODEL：")
+    print("\n請選擇要列入 summary「加單建議（選）」的 Excess 報表 MODEL：")
     print("預設全選；輸入搜尋文字篩選，編號可用逗號分隔切換勾選。")
     print("指令：A 全選、N 全取消、D 完成、S 略過 summary。")
 
@@ -577,7 +685,7 @@ def select_summary_models_window(
 
     tk.Label(
         body,
-        text="選擇要列入 summary「加單建議」的 BOM MODEL",
+        text="選擇要列入 summary「加單建議（選）」的 Excess 報表 MODEL",
         bg=background,
         fg=ink,
         font=("TkDefaultFont", 17, "bold"),
@@ -585,7 +693,7 @@ def select_summary_models_window(
     ).grid(row=0, column=0, sticky="ew")
     tk.Label(
         body,
-        text="預設全選。可搜尋 MODEL 並個別勾選；略過會只跳過 summary。",
+        text="選項來自剛產出的 Excess 報表 MODEL 欄；預設全選。略過會只跳過 summary。",
         bg=background,
         fg=muted,
         font=("TkDefaultFont", 10),
@@ -718,7 +826,7 @@ def select_summary_models_window(
 
     search_var.trace_add("write", filter_models)
     if not models:
-        count_label.configure(text="BOM 中沒有可選的非空 MODEL。", fg="#a86312")
+        count_label.configure(text="Excess 報表中沒有可選的非空 MODEL。", fg="#a86312")
         all_checkbox.configure(state="disabled")
         confirm_button.configure(state="disabled")
     else:
@@ -829,30 +937,36 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         customer = resolve_customer(customer, input_dir, output_file)
 
-        summary_models: tuple[str, ...] | None = None
-        include_summary = True
-        if customer in {"AVTC", "RAKEN"} and sys.stdin is not None and sys.stdin.isatty():
-            bom_models = load_summary_models(input_dir)
-            selection = select_summary_models_window(bom_models)
-            if selection is None:
-                summary_models, include_summary = select_summary_models_prompt(bom_models)
-            elif selection.cancelled:
-                print("已取消執行。")
-                return 1
-            else:
-                summary_models = selection.selected_models
-                include_summary = selection.include_summary
-
         if customer:
             print(f"Customer: {customer}")
-        generate_report(
+        prepared = prepare_report(
             input_dir,
             output_file,
             customer=customer,
             show_progress=not args.no_progress,
-            summary_models=summary_models,
-            include_summary=include_summary,
         )
+
+        if customer in {"AVTC", "RAKEN"}:
+            summary_models: tuple[str, ...] | None = None
+            include_summary = True
+            if sys.stdin is not None and sys.stdin.isatty():
+                report_models = load_report_models(prepared.result.output_file)
+                selection = select_summary_models_window(report_models)
+                if selection is None:
+                    summary_models, include_summary = select_summary_models_prompt(report_models)
+                elif selection.cancelled:
+                    print("已取消 Summary 選擇；已保留 Excess 報表，不產出 summary。")
+                    return 0
+                else:
+                    summary_models = selection.selected_models
+                    include_summary = selection.include_summary
+            if include_summary:
+                write_summary_for_report(
+                    prepared,
+                    selected_models=summary_models,
+                    show_progress=not args.no_progress,
+                )
+
         print("Done.")
         return 0
     except Exception as exc:  # noqa: BLE001 - show friendly exe errors
