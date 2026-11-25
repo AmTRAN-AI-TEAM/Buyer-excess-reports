@@ -179,6 +179,7 @@ class _ProductionSuggestion:
     target_model: str
     calculation_top_assembly: str
     quantity: int
+    raw_quantity: float
     source_rank: int
     trigger_parts: tuple[str, ...]
     trigger_consumed_amount: float | None
@@ -1070,6 +1071,7 @@ def _recommend_production_orders(
                 target_model=match.target_model,
                 calculation_top_assembly=match.calculation_top_assembly,
                 quantity=quantity,
+                raw_quantity=entry.stock_qty / match.usage_qty,
                 source_rank=entry.rank,
                 trigger_parts=tuple(entry.source.parts),
                 trigger_consumed_amount=trigger_consumed_amount,
@@ -1796,7 +1798,8 @@ def _write_consumption_sheet(
                     _suggestion_shortage_text(suggestion),
                     (
                         f"Top {suggestion.source_rank} 料號庫存 ÷ BOM 每台用量，"
-                        "無條件捨去；消耗率 = 所有相關料號可消耗 USD ÷ "
+                        f"{_quantity_result_text(suggestion.raw_quantity, suggestion.quantity)}；"
+                        "消耗率 = 所有相關料號可消耗 USD ÷ "
                         "所有相關料號原有 Excess USD（加單前）；"
                         "供料檢查請見「供料明細」"
                     ),
@@ -2026,10 +2029,21 @@ def _gating_rich_text(
             rich_text,
             "計算：Excess stock QTY "
             f"{_format_number(entry.stock_qty)} ÷ {usage_label} "
-            f"{_format_number(match.usage_qty)} = {_format_number(raw_quantity)} 台，"
-            f"無條件捨去為 {floor(raw_quantity)} 台",
+            f"{_format_number(match.usage_qty)} = "
+            f"{_quantity_result_text(raw_quantity, floor(raw_quantity))}",
         )
     return rich_text
+
+
+def _quantity_result_text(raw_quantity: float, quantity: int) -> str:
+    """Describe the result without labeling an already integral value as rounded down."""
+    nearest_integer = round(raw_quantity)
+    if abs(raw_quantity - nearest_integer) <= 1e-9:
+        return f"{_format_number(nearest_integer)} 台"
+    return (
+        f"{_format_number(raw_quantity)} 台，"
+        f"無條件捨去到整數位為 {quantity} 台"
+    )
 
 
 def _append_rich_text(
