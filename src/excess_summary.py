@@ -57,6 +57,7 @@ SUPPLY_DETAIL_HEADERS = [
     "BOM MODEL",
     "TOP_ASSEMBLY_ITEM",
     "必要料號／替代料群",
+    "供料角色",
     "對應 BOM 列",
     "每台用量",
     "加單需求量",
@@ -140,7 +141,10 @@ class _BomMatch:
     matched_part: str
     usage_qty: float
     bom_rows: tuple[_BomRowDetail, ...]
-    slot_key: tuple[str, str, frozenset[str]]
+    slot_key: tuple[str, str, str, frozenset[str]] | None
+    match_kind: str = "component"
+    assembly_key: tuple[str, str, str] | None = None
+    assembly_row: int | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,7 @@ class _MaterialCheck:
     price: float | None
     status: str
     note: str | None = None
+    role: str = "一般物料"
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,9 @@ class _BomUsageSlot:
     model_name: str
     finished_good_key: str
     finished_good_name: str
+    assembly_item_key: str
+    assembly_item_name: str
+    assembly_key: tuple[str, str, str]
     parts: frozenset[str]
     part_usage: dict[str, float]
     bom_rows: tuple[_BomRowDetail, ...]
@@ -420,12 +428,19 @@ def _filter_bom_matches_by_item_type(
     bom_matches_by_source_row: dict[int, _BomMatch],
     item_data: ItemWorkbookData | None,
 ) -> dict[int, _BomMatch]:
-    """Keep BOM matches whose actual matched part has an allowed Item TYPE."""
+    """Keep eligible BOM matches, exempting matched semi-finished assemblies from TYPE filtering."""
     if item_data is None:
         return {}
 
     filtered: dict[int, _BomMatch] = {}
     for source_row, match in bom_matches_by_source_row.items():
+        # A semi-finished candidate is already proven to be a 3-prefixed
+        # L ASSEMBLY_ITEM by _bom_matches_by_source_model().  It is therefore
+        # allowed to proceed without an Item TYPE value; normal component
+        # candidates continue to use the existing TYPE allow-list.
+        if match.match_kind == "semi":
+            filtered[source_row] = match
+            continue
         item_type = item_data.item_type_for(match.matched_part)
         if is_allowed_summary_item_type(item_type):
             filtered[source_row] = match
@@ -553,7 +568,7 @@ def _bom_usage_slots(
     component_usages: tuple[BomComponentUsage, ...],
 ) -> tuple[_BomUsageSlot, ...]:
     raw_slots: dict[
-        tuple[str, str, frozenset[str]],
+        tuple[str, str, str, frozenset[str]],
         dict[str, Any],
     ] = {}
     for usage in component_usages:
@@ -561,16 +576,19 @@ def _bom_usage_slots(
         model_key = model_name.casefold()
         finished_good_name = (usage.finished_good or "").strip()
         finished_good_key = finished_good_name.casefold()
+        assembly_item_name = (usage.assembly_item or usage.finished_good or "").strip()
+        assembly_item_key = assembly_item_name.casefold()
         parts = frozenset(_part_key(part) for part in usage.parts if _part_key(part))
-        if not model_key or not finished_good_key or not parts:
+        if not model_key or not finished_good_key or not assembly_item_key or not parts:
             continue
 
-        slot_key = (model_key, finished_good_key, parts)
+        slot_key = (model_key, finished_good_key, assembly_item_key, parts)
         slot = raw_slots.setdefault(
             slot_key,
             {
                 "model_name": model_name,
                 "finished_good_name": finished_good_name,
+                "assembly_item_name": assembly_item_name,
                 "part_usage": {},
                 "bom_rows": [],
                 "row_number": usage.row_number,
@@ -598,12 +616,16 @@ def _bom_usage_slots(
             model_name=slot["model_name"],
             finished_good_key=finished_good_key,
             finished_good_name=slot["finished_good_name"],
+            assembly_item_key=assembly_item_key,
+            assembly_item_name=slot["assembly_item_name"],
+            assembly_key=(model_key, finished_good_key, assembly_item_key),
             parts=parts,
             part_usage=slot["part_usage"],
             bom_rows=tuple(slot["bom_rows"]),
             row_number=slot["row_number"],
         )
-        for (model_key, finished_good_key, parts), slot in raw_slots.items()
+        for (model_key, finished_good_key, assembly_item_key, parts), slot
+        in raw_slots.items()
     )
 
 
@@ -677,6 +699,126 @@ def _summary_model_for_source(
     return UNMATCHED_BOM_MODEL
 
 
+def _is_semifinished_part(part: str) -> bool:
+    """A 3-prefixed part is treated as a BOM assembly/半成品."""
+    return str(part).strip().startswith("3")
+
+
+def _is_semifinished_source(source: ExcessSummarySourceRow) -> bool:
+    """Use the primary report part to decide whether D 欄 matching applies."""
+    return bool(source.parts) and _is_semifinished_part(source.parts[0])
+
+
+def _model_match_score(report_model: str, bom_model: str) -> int:
+    """Prefer an exact/contained report MODEL match, but allow BOM aliases."""
+    report_key = str(report_model or "").strip().casefold()
+    bom_key = str(bom_model or "").strip().casefold()
+    if report_key and report_key == bom_key:
+        return 0
+    if report_key and (report_key in bom_key or bom_key in report_key):
+        return 1
+    return 2
+
+
+def _assembly_usage_qty(
+    target_slot: _BomUsageSlot,
+    usage_slots: tuple[_BomUsageSlot, ...],
+    active_keys: frozenset[tuple[str, str, str]] = frozenset(),
+) -> tuple[float, str | None]:
+    """Return an assembly's quantity per finished good by walking D -> H paths.
+
+    A top-level D equal to A is one assembly per finished good.  Nested
+    assemblies multiply the quantities along their parent component path.
+    """
+    if target_slot.assembly_item_key == target_slot.finished_good_key:
+        return 1.0, None
+    if target_slot.assembly_key in active_keys:
+        return 1.0, "BOM 組裝階層出現循環，半成品用量暫以 1 件/台估算"
+
+    parent_candidates: list[tuple[int, _BomUsageSlot, float]] = []
+    for parent in usage_slots:
+        if (
+            parent.model_key != target_slot.model_key
+            or parent.finished_good_key != target_slot.finished_good_key
+            or parent.assembly_item_key == target_slot.assembly_item_key
+        ):
+            continue
+        quantity = parent.part_usage.get(target_slot.assembly_item_key)
+        if quantity is not None and quantity > 0:
+            parent_candidates.append((parent.row_number, parent, quantity))
+    if not parent_candidates:
+        return 1.0, "找不到半成品的上階 BOM 用量，暫以 1 件/台估算"
+
+    _row_number, parent, child_quantity = min(
+        parent_candidates,
+        key=lambda item: item[0],
+    )
+    parent_quantity, parent_note = _assembly_usage_qty(
+        parent,
+        usage_slots,
+        active_keys | {target_slot.assembly_key},
+    )
+    note = parent_note
+    return parent_quantity * child_quantity, note
+
+
+def _match_semifinished_source(
+    source: ExcessSummarySourceRow,
+    usage_slots: tuple[_BomUsageSlot, ...],
+    slots_by_assembly_item: dict[str, tuple[_BomUsageSlot, ...]] | None = None,
+) -> _BomMatch | None:
+    """Match a 3-prefixed report part against BOM D/L ASSEMBLY_ITEM."""
+    part_keys = {
+        _part_key(part): str(part).strip()
+        for part in source.parts
+        if _part_key(part)
+    }
+    candidates: list[tuple[tuple[Any, ...], _BomUsageSlot]] = []
+    report_model = _report_model_for_source(source)
+    candidate_slots = (
+        tuple(
+            slot
+            for part_key in part_keys
+            for slot in slots_by_assembly_item.get(part_key, ())
+        )
+        if slots_by_assembly_item is not None
+        else usage_slots
+    )
+    for slot in candidate_slots:
+        if slot.assembly_item_key not in part_keys:
+            continue
+        score = _model_match_score(report_model, slot.model_name)
+        candidates.append(
+            (
+                (
+                    score,
+                    slot.row_number,
+                    0 if slot.assembly_item_key == _part_key(source.parts[0]) else 1,
+                    slot.finished_good_key,
+                ),
+                slot,
+            )
+        )
+    if not candidates:
+        return None
+
+    _sort_key, slot = min(candidates, key=lambda item: item[0])
+    usage_qty, _usage_note = _assembly_usage_qty(slot, usage_slots)
+    matched_part = slot.assembly_item_name
+    return _BomMatch(
+        model_key=slot.model_key,
+        target_model=slot.model_name,
+        calculation_top_assembly=slot.finished_good_name,
+        matched_part=matched_part,
+        usage_qty=usage_qty,
+        bom_rows=((slot.row_number, matched_part, usage_qty),),
+        slot_key=None,
+        match_kind="semi",
+        assembly_key=slot.assembly_key,
+        assembly_row=slot.row_number,
+    )
+
+
 def _match_source_to_model(
     source: ExcessSummarySourceRow,
     model_key: str,
@@ -726,7 +868,13 @@ def _match_source_to_model(
             for row in slot.bom_rows
             if _part_key(row[1]) == matched_part
         ),
-        slot_key=(slot.model_key, slot.finished_good_key, slot.parts),
+        slot_key=(
+            slot.model_key,
+            slot.finished_good_key,
+            slot.assembly_item_key,
+            slot.parts,
+        ),
+        assembly_key=slot.assembly_key,
     )
 
 
@@ -742,9 +890,25 @@ def _bom_matches_by_source_model(
         model_key: tuple(slots)
         for model_key, slots in slot_lists_by_model.items()
     }
+    slots_by_assembly_item: dict[str, list[_BomUsageSlot]] = {}
+    for slot in usage_slots:
+        slots_by_assembly_item.setdefault(slot.assembly_item_key, []).append(slot)
+    indexed_assembly_slots = {
+        part_key: tuple(slots)
+        for part_key, slots in slots_by_assembly_item.items()
+    }
 
     matches: dict[int, _BomMatch] = {}
     for index, source in enumerate(source_rows):
+        if _is_semifinished_source(source):
+            match = _match_semifinished_source(
+                source,
+                usage_slots,
+                indexed_assembly_slots,
+            )
+            if match is not None:
+                matches[index + 3] = match
+            continue
         model_key = _model_key(bom_models_by_source_row.get(index + 3))
         if not model_key:
             continue
@@ -777,15 +941,26 @@ def _recommend_production_orders(
         for index, source in enumerate(source_rows)
     }
     allocations_by_slot: dict[
-        tuple[str, str, frozenset[str]],
+        tuple[str, str, str, frozenset[str]],
+        list[_InventoryAllocation],
+    ] = {}
+    semifinished_allocations_by_assembly: dict[
+        tuple[str, str, str],
         list[_InventoryAllocation],
     ] = {}
     for source_row, match in bom_matches_by_source_row.items():
         source = source_by_row.get(source_row)
-        if source is not None:
-            allocations_by_slot.setdefault(match.slot_key, []).append(
-                _InventoryAllocation(source_row, source)
-            )
+        if source is None:
+            continue
+        allocation = _InventoryAllocation(source_row, source)
+        if match.match_kind == "semi":
+            if match.assembly_key is not None:
+                semifinished_allocations_by_assembly.setdefault(
+                    match.assembly_key,
+                    [],
+                ).append(allocation)
+        elif match.slot_key is not None:
+            allocations_by_slot.setdefault(match.slot_key, []).append(allocation)
 
     assignments = {
         entry.source_row: bom_matches_by_source_row[entry.source_row]
@@ -796,11 +971,21 @@ def _recommend_production_orders(
 
     recommendable_entries_by_model: dict[str, tuple[_TopFiveEntry, ...]] = {}
     for model, entries in top_five_by_model.items():
-        recommendable_entries = tuple(
-            entry
-            for entry in entries
-            if entry.source_row in assignments
-        )[:SUMMARY_TOP_LIMIT]
+        recommendable_list: list[_TopFiveEntry] = []
+        selected_assemblies: set[str] = set()
+        for entry in entries:
+            match = assignments.get(entry.source_row)
+            if match is None:
+                continue
+            entry_parts = {_part_key(part) for part in entry.source.parts}
+            if any(part in selected_assemblies for part in entry_parts):
+                continue
+            if match.match_kind == "semi":
+                selected_assemblies.add(match.matched_part.casefold())
+            recommendable_list.append(entry)
+            if len(recommendable_list) >= SUMMARY_TOP_LIMIT:
+                break
+        recommendable_entries = tuple(recommendable_list)
         if recommendable_entries:
             recommendable_entries_by_model[model] = recommendable_entries
 
@@ -815,21 +1000,37 @@ def _recommend_production_orders(
             continue
 
         quantity = ceil(entry.stock_qty / match.usage_qty)
-        scenario_slots = tuple(
-            slot
-            for slot in usage_slots
-            if (
-                slot.model_key == match.model_key
-                and slot.finished_good_key
-                == match.slot_key[1]
+        if match.match_kind == "semi" and match.assembly_key is not None:
+            scenario_slots = tuple(
+                slot
+                for slot in usage_slots
+                if slot.assembly_key == match.assembly_key
             )
-        )
-        material_checks = _material_checks_for_scenario(
-            scenario_slots,
-            allocations_by_slot,
-            quantity,
-            item_data,
-        )
+            material_checks = _material_checks_for_semifinished_scenario(
+                match,
+                scenario_slots,
+                usage_slots,
+                allocations_by_slot,
+                semifinished_allocations_by_assembly,
+                quantity,
+                item_data,
+            )
+        else:
+            scenario_slots = tuple(
+                slot
+                for slot in usage_slots
+                if (
+                    slot.model_key == match.model_key
+                    and match.slot_key is not None
+                    and slot.finished_good_key == match.slot_key[1]
+                )
+            )
+            material_checks = _material_checks_for_scenario(
+                scenario_slots,
+                allocations_by_slot,
+                quantity,
+                item_data,
+            )
         trigger_consumed_amount = _source_amount_for_consumed_qty(
             entry.source,
             min(max(entry.stock_qty, 0), quantity * match.usage_qty),
@@ -902,10 +1103,345 @@ def _recommend_production_orders(
     )
 
 
+def _component_slot_key(
+    slot: _BomUsageSlot,
+) -> tuple[str, str, str, frozenset[str]]:
+    return (
+        slot.model_key,
+        slot.finished_good_key,
+        slot.assembly_item_key,
+        slot.parts,
+    )
+
+
+def _find_semifinished_slot(
+    part_key: str,
+    anchor_slot: _BomUsageSlot,
+    usage_slots: tuple[_BomUsageSlot, ...],
+) -> _BomUsageSlot | None:
+    candidates = [
+        slot
+        for slot in usage_slots
+        if (
+            slot.assembly_item_key == part_key
+            and slot.model_key == anchor_slot.model_key
+            and slot.finished_good_key == anchor_slot.finished_good_key
+        )
+    ]
+    return min(candidates, key=lambda slot: slot.row_number) if candidates else None
+
+
+def _consume_inventory_allocations(
+    allocations: list[_InventoryAllocation],
+    required_qty: float,
+    consumed_by_source: dict[int, float],
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+    float,
+    float | None,
+    float | None,
+    float | None,
+]:
+    """Consume available Excess quantities once, returning qty and USD totals."""
+    available_qty = 0.0
+    po_qty = 0.0
+    consumed_qty = 0.0
+    available_amounts: list[float | None] = []
+    consumed_amounts: list[float | None] = []
+    remaining_amounts: list[float | None] = []
+    remaining_need = max(required_qty, 0.0)
+
+    for allocation in allocations:
+        metrics = _last_period_metrics(allocation.source)
+        source_qty = max(metrics.stock_qty, 0)
+        already_consumed = min(
+            source_qty,
+            max(consumed_by_source.get(allocation.source_row, 0.0), 0.0),
+        )
+        available_from_source = max(source_qty - already_consumed, 0.0)
+        consumed_from_source = min(available_from_source, remaining_need)
+        consumed_by_source[allocation.source_row] = (
+            already_consumed + consumed_from_source
+        )
+        remaining_need -= consumed_from_source
+        available_qty += available_from_source
+        consumed_qty += consumed_from_source
+        po_qty += max(metrics.po_qty, 0)
+        available_amounts.append(
+            _source_amount_for_consumed_qty(allocation.source, available_from_source)
+        )
+        consumed_amounts.append(
+            _source_amount_for_consumed_qty(
+                allocation.source,
+                consumed_from_source,
+            )
+        )
+        remaining_amounts.append(
+            _source_amount_for_consumed_qty(
+                allocation.source,
+                max(available_from_source - consumed_from_source, 0.0),
+            )
+        )
+
+    return (
+        available_qty,
+        po_qty,
+        consumed_qty,
+        max(required_qty - available_qty, 0.0),
+        max(available_qty - required_qty, 0.0),
+        _sum_optional_amount(available_amounts),
+        _sum_optional_amount(consumed_amounts),
+        _sum_optional_amount(remaining_amounts),
+    )
+
+
+def _material_check_from_allocations(
+    *,
+    parts: tuple[str, ...],
+    bom_rows: tuple[_BomRowDetail, ...],
+    usage_qty: float,
+    required_qty: float,
+    allocations: list[_InventoryAllocation],
+    item_data: ItemWorkbookData | None,
+    consumed_by_source: dict[int, float],
+    role: str,
+    note: str | None = None,
+    extra_purchase_override: float | None = None,
+) -> _MaterialCheck:
+    (
+        available_qty,
+        po_qty,
+        consumed_qty,
+        calculated_extra_purchase_qty,
+        remaining_qty,
+        available_amount,
+        consumed_amount,
+        remaining_amount,
+    ) = _consume_inventory_allocations(
+        allocations,
+        required_qty,
+        consumed_by_source,
+    )
+    extra_purchase_qty = (
+        calculated_extra_purchase_qty
+        if extra_purchase_override is None
+        else extra_purchase_override
+    )
+    note_parts = [value for value in (note,) if value]
+    if not allocations:
+        note_parts.append("找不到此必要料號的 Excess 來源")
+    if any(
+        amount is None
+        for amount in (available_amount, consumed_amount, remaining_amount)
+    ):
+        note_parts.append("缺少單價，USD 金額無法完整計算")
+    price = next(
+        (
+            allocation.source.price
+            for allocation in allocations
+            if allocation.source.price is not None
+        ),
+        _fallback_price_for_parts(item_data, frozenset(parts)),
+    )
+    return _MaterialCheck(
+        parts=tuple(parts),
+        bom_rows=bom_rows,
+        usage_qty=usage_qty,
+        required_qty=required_qty,
+        available_qty=available_qty,
+        po_qty=po_qty,
+        consumed_qty=consumed_qty,
+        extra_purchase_qty=extra_purchase_qty,
+        remaining_qty=remaining_qty,
+        available_amount=available_amount,
+        consumed_amount=consumed_amount,
+        remaining_amount=remaining_amount,
+        price=price,
+        status="不足" if extra_purchase_qty > 1e-9 else "足夠",
+        note="；".join(note_parts) or None,
+        role=role,
+    )
+
+
+def _material_checks_for_semifinished_scenario(
+    match: _BomMatch,
+    scenario_slots: tuple[_BomUsageSlot, ...],
+    usage_slots: tuple[_BomUsageSlot, ...],
+    allocations_by_slot: dict[
+        tuple[str, str, str, frozenset[str]],
+        list[_InventoryAllocation],
+    ],
+    semifinished_allocations_by_assembly: dict[
+        tuple[str, str, str],
+        list[_InventoryAllocation],
+    ],
+    order_quantity: int,
+    item_data: ItemWorkbookData | None,
+) -> tuple[_MaterialCheck, ...]:
+    """Consume a semi-finished assembly first, then recursively explode D -> H."""
+    if match.assembly_key is None:
+        return ()
+
+    consumed_by_source: dict[int, float] = {}
+    root_slot = min(scenario_slots, key=lambda slot: slot.row_number, default=None)
+    if root_slot is None:
+        return ()
+
+    checks: list[_MaterialCheck] = []
+
+    def expand_assembly(
+        assembly_slot: _BomUsageSlot,
+        required_qty: float,
+        *,
+        display_usage_qty: float,
+        role: str,
+        active_assemblies: frozenset[tuple[str, str, str]],
+    ) -> None:
+        assembly_key = assembly_slot.assembly_key
+        allocations = semifinished_allocations_by_assembly.get(assembly_key, [])
+        note_parts: list[str] = []
+        if assembly_key in active_assemblies:
+            note_parts.append("BOM 組裝階層出現循環，停止繼續展開")
+            remaining_need = required_qty
+            available_qty = 0.0
+            po_qty = 0.0
+            consumed_qty = 0.0
+            available_amount = 0.0
+            consumed_amount = 0.0
+            remaining_amount = 0.0
+            after_stock_qty = 0.0
+        else:
+            (
+                available_qty,
+                po_qty,
+                consumed_qty,
+                _extra_purchase_qty,
+                after_stock_qty,
+                available_amount,
+                consumed_amount,
+                remaining_amount,
+            ) = _consume_inventory_allocations(
+                allocations,
+                required_qty,
+                consumed_by_source,
+            )
+            remaining_need = max(required_qty - consumed_qty, 0.0)
+
+        if remaining_need > 1e-9:
+            note_parts.append(
+                f"半成品庫存不足 {_format_number(remaining_need)} 件，已展開下階物料"
+            )
+        checks.append(
+            _MaterialCheck(
+                parts=(assembly_slot.assembly_item_name,),
+                bom_rows=(
+                    (
+                        assembly_slot.row_number,
+                        assembly_slot.assembly_item_name,
+                        1.0,
+                    ),
+                ),
+                usage_qty=display_usage_qty,
+                required_qty=required_qty,
+                available_qty=available_qty,
+                po_qty=po_qty,
+                consumed_qty=consumed_qty,
+                # 半成品不足時改由下階物料供應，不在半成品列重複要求採購。
+                extra_purchase_qty=0.0,
+                remaining_qty=after_stock_qty,
+                available_amount=available_amount,
+                consumed_amount=consumed_amount,
+                remaining_amount=remaining_amount,
+                price=next(
+                    (
+                        allocation.source.price
+                        for allocation in allocations
+                        if allocation.source.price is not None
+                    ),
+                    _fallback_price_for_parts(
+                        item_data,
+                        frozenset({assembly_slot.assembly_item_name}),
+                    ),
+                ),
+                status=("足夠" if remaining_need <= 1e-9 else "不足；已展開下階物料"),
+                note="；".join(note_parts) or None,
+                role=role,
+            )
+        )
+
+        if remaining_need <= 1e-9 or assembly_key in active_assemblies:
+            return
+
+        next_active = active_assemblies | {assembly_key}
+        child_slots = sorted(
+            {
+                _component_slot_key(slot): slot
+                for slot in usage_slots
+                if slot.assembly_key == assembly_key
+            }.values(),
+            key=lambda slot: slot.row_number,
+        )
+        for child_slot in child_slots:
+            child_usage, child_note = _slot_usage_qty(child_slot)
+            if child_usage <= 0:
+                continue
+            child_required = remaining_need * child_usage
+            semi_children = [
+                part
+                for part in child_slot.parts
+                if _is_semifinished_part(part)
+                and _find_semifinished_slot(part, assembly_slot, usage_slots) is not None
+            ]
+            if len(child_slot.parts) == 1 and semi_children:
+                nested_slot = _find_semifinished_slot(
+                    semi_children[0],
+                    assembly_slot,
+                    usage_slots,
+                )
+                if nested_slot is not None:
+                    expand_assembly(
+                        nested_slot,
+                        child_required,
+                        display_usage_qty=child_usage,
+                        role="下階半成品",
+                        active_assemblies=next_active,
+                    )
+                    continue
+
+            checks.append(
+                _material_check_from_allocations(
+                    parts=tuple(sorted(child_slot.parts)),
+                    bom_rows=child_slot.bom_rows,
+                    usage_qty=child_usage,
+                    required_qty=child_required,
+                    allocations=allocations_by_slot.get(
+                        _component_slot_key(child_slot),
+                        [],
+                    ),
+                    item_data=item_data,
+                    consumed_by_source=consumed_by_source,
+                    role="下階物料",
+                    note=child_note,
+                )
+            )
+
+    expand_assembly(
+        root_slot,
+        order_quantity * match.usage_qty,
+        display_usage_qty=match.usage_qty,
+        role="半成品",
+        active_assemblies=frozenset(),
+    )
+    return tuple(checks)
+
+
 def _material_checks_for_scenario(
     scenario_slots: tuple[_BomUsageSlot, ...],
     allocations_by_slot: dict[
-        tuple[str, str, frozenset[str]],
+        tuple[str, str, str, frozenset[str]],
         list[_InventoryAllocation],
     ],
     order_quantity: int,
@@ -917,7 +1453,7 @@ def _material_checks_for_scenario(
         if usage_qty <= 0:
             continue
         allocations = allocations_by_slot.get(
-            (slot.model_key, slot.finished_good_key, slot.parts),
+            _component_slot_key(slot),
             [],
         )
         required_qty = order_quantity * usage_qty
@@ -1285,7 +1821,8 @@ def _write_supply_detail_sheet(
                         suggestion.target_model,
                         suggestion.calculation_top_assembly,
                         _display_parts(check.parts),
-                        _format_bom_rows(check.bom_rows),
+                        check.role,
+                        _format_supply_bom_rows(check),
                         check.usage_qty,
                         check.required_qty,
                         check.available_qty,
@@ -1305,6 +1842,15 @@ def _write_supply_detail_sheet(
                     ]
                 )
     _format_supply_detail_sheet(worksheet, worksheet.max_row)
+
+
+def _format_supply_bom_rows(check: _MaterialCheck) -> str:
+    if "半成品" in check.role:
+        return "、".join(
+            f"第{row_number}列（D欄 L ASSEMBLY_ITEM {part}）"
+            for row_number, part, _quantity in check.bom_rows
+        )
+    return _format_bom_rows(check.bom_rows)
 
 
 def _write_recommendations_sheet(
@@ -1415,8 +1961,24 @@ def _gating_rich_text(
             if item_data is not None
             else None
         )
-        if item_type:
+        if match.match_kind == "semi":
+            _append_rich_text(
+                rich_text,
+                f"TYPE：{item_type or '空白'}（半成品免 TYPE 篩選）\n",
+            )
+        elif item_type:
             _append_rich_text(rich_text, f"TYPE：{item_type}\n")
+        if match.match_kind == "semi":
+            _append_rich_text(
+                rich_text,
+                f"半成品判定：料號以 3 開頭，匹配 BOM D 欄 L ASSEMBLY_ITEM："
+                f"{match.matched_part}\n",
+            )
+        else:
+            _append_rich_text(
+                rich_text,
+                "匹配 BOM H 欄 COMPONENT_ITEM\n",
+            )
         _append_rich_text(
             rich_text,
             f"對應 BOM MODEL：{match.target_model}\n",
@@ -1425,19 +1987,41 @@ def _gating_rich_text(
             rich_text,
             f"對應 TOP_ASSEMBLY_ITEM：{match.calculation_top_assembly}\n",
         )
-        _append_rich_text(
-            rich_text,
-            f"對應 BOM 列：{_format_bom_rows(match.bom_rows)}\n",
-        )
+        if match.match_kind == "semi":
+            _append_rich_text(
+                rich_text,
+                f"對應 BOM 列：第{match.assembly_row or match.bom_rows[0][0]}列 "
+                f"（D欄 L ASSEMBLY_ITEM {match.matched_part}）\n",
+            )
+            _append_rich_text(
+                rich_text,
+                f"半成品每台用量：{_format_number(match.usage_qty)} 件/台"
+                + (
+                    "（D=A 頂層組裝品，按每台 1 件計算）"
+                    if abs(match.usage_qty - 1.0) < 1e-9
+                    else "（依 BOM 階層用量乘算）"
+                )
+                + "\n",
+            )
+        else:
+            _append_rich_text(
+                rich_text,
+                f"對應 BOM 列：{_format_bom_rows(match.bom_rows)}\n",
+            )
+            _append_rich_text(
+                rich_text,
+                f"EXTENDED_QT 使用量：{_format_bom_usage(match.bom_rows, match.usage_qty)}\n",
+            )
         raw_quantity = entry.stock_qty / match.usage_qty
-        _append_rich_text(
-            rich_text,
-            f"EXTENDED_QT 使用量：{_format_bom_usage(match.bom_rows, match.usage_qty)}\n",
+        usage_label = (
+            "半成品每台用量"
+            if match.match_kind == "semi"
+            else "EXTENDED_QT"
         )
         _append_rich_text(
             rich_text,
             "計算：Excess stock QTY "
-            f"{_format_number(entry.stock_qty)} ÷ EXTENDED_QT "
+            f"{_format_number(entry.stock_qty)} ÷ {usage_label} "
             f"{_format_number(match.usage_qty)} = {_format_number(raw_quantity)} 台，"
             f"向上取整為 {ceil(raw_quantity)} 台",
         )
@@ -1651,20 +2235,20 @@ def _format_supply_detail_sheet(worksheet: Any, last_row: int) -> None:
     )
     worksheet.row_dimensions[3].height = 44
     widths = [
-        12, 24, 28, 30, 48, 12, 14, 18, 20, 14, 14, 16, 16, 15, 20, 20, 38
+        12, 24, 28, 30, 16, 48, 12, 14, 18, 20, 14, 14, 16, 16, 15, 20, 20, 38
     ]
     for column, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(column)].width = width
     for row in range(4, last_row + 1):
         worksheet.row_dimensions[row].height = 42
-        for column in (6, 7, 8, 10, 11, 12, 13):
+        for column in (7, 8, 9, 11, 12, 13, 14):
             worksheet.cell(row, column).number_format = "#,##0.###;[Red]-#,##0.###;0"
-        worksheet.cell(row, 9).number_format = "#,##0.00;[Red]-#,##0.00;0"
-        worksheet.cell(row, 14).number_format = "#,##0.0000;[Red]-#,##0.0000;0"
-        for column in (15, 16):
+        worksheet.cell(row, 10).number_format = "#,##0.00;[Red]-#,##0.00;0"
+        worksheet.cell(row, 15).number_format = "#,##0.0000;[Red]-#,##0.0000;0"
+        for column in (16, 17):
             worksheet.cell(row, column).number_format = "#,##0.00;[Red]-#,##0.00;0"
-        if str(worksheet.cell(row, 17).value).startswith("不足"):
-            worksheet.cell(row, 17).font = Font(name="Arial", size=9, color="FFFF0000")
+        if str(worksheet.cell(row, 18).value).startswith("不足"):
+            worksheet.cell(row, 18).font = Font(name="Arial", size=9, color="FFFF0000")
 
 
 def _format_detail_sheet(worksheet: Any, column_count: int, last_row: int) -> None:
@@ -1800,8 +2384,8 @@ def _header_fill_color(worksheet: Any, column: int, column_count: int) -> str:
         )
     elif title == "供料明細":
         groups = (
-            (1, 5, blue), (6, 7, peach), (8, 10, yellow),
-            (11, 13, green), (14, 16, purple), (17, 17, gray)
+            (1, 4, blue), (5, 6, peach), (7, 11, yellow),
+            (12, 14, green), (15, 17, purple), (18, 18, gray)
         )
     elif title == "庫存金額Top5":
         header = worksheet.cell(3, column).value

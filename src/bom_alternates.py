@@ -28,6 +28,8 @@ class BomComponentUsage:
     usage_qty: float | None
     part_usage_qtys: tuple[tuple[str, float | None], ...] = ()
     part_usage_rows: tuple[tuple[str, int, float | None], ...] = ()
+    # BOM D 欄 L ASSEMBLY_ITEM。Summary 需要依此欄位辨識半成品組裝品。
+    assembly_item: str | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ def load_bom_alternates(
             float | None,
             tuple[tuple[str, float | None], ...],
             tuple[tuple[str, int, float | None], ...],
+            str | None,
         ]
     ] = []
     base_usage_contexts: dict[str, set[tuple[Any, Any, Any]]] = defaultdict(set)
@@ -194,6 +197,7 @@ def load_bom_alternates(
     current_model: str | None = None
     current_component_usage_model: str | None = None
     current_finished_good: str | None = None
+    current_assembly_item: str | None = None
     current_usage_qty: float | None = None
     order = 0
 
@@ -248,6 +252,7 @@ def load_bom_alternates(
                     current_usage_qty,
                     tuple(current_part_usage_qtys),
                     tuple(current_part_usage_rows),
+                    current_assembly_item,
                 )
             )
         _append_segment(
@@ -275,6 +280,7 @@ def load_bom_alternates(
             else current_model
         )
         current_finished_good = _text_or_none(top_assembly)
+        current_assembly_item = _text_or_none(assembly_item)
         current_usage_qty = usage_qty
 
     if include_component_usages and current_base and current_base_row is not None:
@@ -288,6 +294,7 @@ def load_bom_alternates(
                 current_usage_qty,
                 tuple(current_part_usage_qtys),
                 tuple(current_part_usage_rows),
+                current_assembly_item,
             )
         )
     _append_segment(
@@ -317,6 +324,7 @@ def load_bom_alternates(
                 part_usage_qtys=tuple(dict.fromkeys(part_usage_qtys))
                 or ((base_part, usage_qty),),
                 part_usage_rows=tuple(part_usage_rows),
+                assembly_item=assembly_item,
             )
             for (
                 row_number,
@@ -327,6 +335,7 @@ def load_bom_alternates(
                 usage_qty,
                 part_usage_qtys,
                 part_usage_rows,
+                assembly_item,
             ) in raw_component_usages
             if finished_good
         )
