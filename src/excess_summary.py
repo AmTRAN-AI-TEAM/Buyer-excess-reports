@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from math import ceil
+from math import ceil, floor
 from pathlib import Path
 import unicodedata
 from typing import Any, Callable
@@ -999,7 +999,11 @@ def _recommend_production_orders(
         if entry.stock_qty <= 0 or match.usage_qty <= 0:
             continue
 
-        quantity = ceil(entry.stock_qty / match.usage_qty)
+        quantity = floor(entry.stock_qty / match.usage_qty)
+        if quantity <= 0:
+            # Only recommend complete finished-good units. Do not add one
+            # extra unit merely to consume a fractional remainder.
+            continue
         if match.match_kind == "semi" and match.assembly_key is not None:
             scenario_slots = tuple(
                 slot
@@ -1792,7 +1796,7 @@ def _write_consumption_sheet(
                     _suggestion_shortage_text(suggestion),
                     (
                         f"Top {suggestion.source_rank} 料號庫存 ÷ BOM 每台用量，"
-                        "向上取整；消耗率 = 所有相關料號可消耗 USD ÷ "
+                        "無條件捨去；消耗率 = 所有相關料號可消耗 USD ÷ "
                         "所有相關料號原有 Excess USD（加單前）；"
                         "供料檢查請見「供料明細」"
                     ),
@@ -2023,7 +2027,7 @@ def _gating_rich_text(
             "計算：Excess stock QTY "
             f"{_format_number(entry.stock_qty)} ÷ {usage_label} "
             f"{_format_number(match.usage_qty)} = {_format_number(raw_quantity)} 台，"
-            f"向上取整為 {ceil(raw_quantity)} 台",
+            f"無條件捨去為 {floor(raw_quantity)} 台",
         )
     return rich_text
 
